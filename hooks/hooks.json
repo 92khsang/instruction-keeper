@@ -1,0 +1,18 @@
+{
+  "description": "Checks the repository-root AGENTS.md and CLAUDE.md against the instruction-keeper standard after they are written. Warns only, never blocks, and reports only findings the edit introduced. Requires python3 on PATH.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/hook_post_edit.py"],
+            "timeout": 25
+          }
+        ]
+      }
+    ]
+  }
+}

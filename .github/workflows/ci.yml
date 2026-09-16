@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest and the newest interpreter scripts/ claims to support.
+        # 3.8 is past end of life, but actions/python-versions still publishes a
+        # 3.8.18 build for Ubuntu 24.04, which is what ubuntu-latest resolves to
+        # today. It publishes none for Ubuntu 26.04, so when the -latest label
+        # migrates this leg has to pin `runs-on: ubuntu-24.04` or the 3.8 claim
+        # in scripts/check_instructions.py has to move up.
+        python-version: ["3.8", "3.x"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        id: python
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The repository documents every command as `python3`. On a runner that
+      # name can still resolve to the image's own interpreter, which would make
+      # the matrix silently test one version twice.
+      - name: Confirm python3 is the interpreter under test
+        env:
+          INSTALLED: ${{ steps.python.outputs.python-version }}
+        run: |
+          python3 -VV
+          active="$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+          test "$INSTALLED" = "$active"
+
+      # A missing test file must fail the job. Without this the suite would
+      # report success for whichever half of it exists.
+      - name: Require both test files
+        run: |
+          for f in tests/test_check_instructions.py tests/test_hook_post_edit.py; do
+            if [ ! -f "$f" ]; then
+              echo "::error file=$f::required test file is missing"
+              exit 1
+            fi
+          done
+
+      - name: Checker tests
+        run: python3 tests/test_check_instructions.py
+
+      - name: Hook tests
+        run: python3 tests/test_hook_post_edit.py
+
+      # The plugin against its own standard: AGENTS.md plus .claude/CLAUDE.md.
+      - name: Instruction files
+        run: python3 scripts/check_instructions.py --project-root .
+
+# Not run here: `claude plugin validate --strict`. Both manifests pass it on a
+# clean checkout, and the command needs no credentials, but the CLI is not on a
+# GitHub-hosted runner by default and this workflow has not been proven against
+# one. To add it, install the CLI first and validate each manifest by name:
+#   claude plugin validate --strict .claude-plugin/plugin.json
+#   claude plugin validate --strict .claude-plugin/marketplace.json

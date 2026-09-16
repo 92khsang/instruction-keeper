@@ -1,0 +1,33 @@
+{
+  "name": "instruction-keeper",
+  "description": "Single-plugin marketplace for instruction-keeper.",
+  "owner": {
+    "name": "Hayes",
+    "email": "92khsang@gmail.com",
+    "url": "https://github.com/92khsang"
+  },
+  "plugins": [
+    {
+      "name": "instruction-keeper",
+      "source": "./",
+      "description": "Keeps AGENTS.md and CLAUDE.md inside an evidence-based structure: a fixed section set, explicit admission tests for what may go in each section, and enforced length budgets. Requires python3 on PATH.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Hayes",
+        "email": "92khsang@gmail.com"
+      },
+      "homepage": "https://github.com/92khsang/instruction-keeper",
+      "repository": "https://github.com/92khsang/instruction-keeper",
+      "license": "MIT",
+      "keywords": [
+        "agents-md",
+        "claude-md",
+        "instructions",
+        "context-engineering",
+        "documentation",
+        "linting"
+      ],
+      "category": "documentation"
+    }
+  ]
+}

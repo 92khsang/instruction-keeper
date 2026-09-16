@@ -19,6 +19,9 @@ CLAUDE.md standard and ships the checker, skills, agent and hook that apply it.
 - Every claim about how an agent runtime behaves carries a citation in
   `evidence.md` or is generalized until it needs none. Do not invent a source,
   a figure, or a vendor's behaviour.
+- Supported scope is Claude Code on Linux and macOS, because that is what CI
+  runs. Widen it in the README only after a run on the new platform, not after
+  reading the code.
 - Claude Code reads `CLAUDE.md`, never `AGENTS.md`, at any level. A nested
   `AGENTS.md` is not loaded on demand; a nested `CLAUDE.md` beside it is.
 - The budget numbers are restated in prose across the skills, the agent and

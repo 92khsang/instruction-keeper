@@ -46,14 +46,16 @@ the `claude` CLI.
 python3 tests/test_check_instructions.py
 python3 tests/test_hook_post_edit.py
 python3 scripts/check_instructions.py --project-root .
-claude plugin validate --strict .claude-plugin/plugin.json
+claude plugin validate .claude-plugin/plugin.json
 claude plugin validate --strict .claude-plugin/marketplace.json
 ```
 
-Name the manifest you mean: `claude plugin validate --strict .` checks only the
-marketplace file once one exists. The plugin form warns on any `CLAUDE.md` at a
-plugin root — hence the stub at `.claude/CLAUDE.md` — and on a local, gitignored
-`CLAUDE.local.md`, which a clean checkout does not have.
+Name the manifest you mean: `--strict .` checks only the marketplace file. The
+plugin form drops `--strict` because it warns on this repository's own
+`CLAUDE.md`, and on a gitignored `CLAUDE.local.md` when one is there; both are
+expected and any other warning is not. Neither call catches a hook that fails to
+load — `claude plugin list` does, so run it after touching the manifest or the
+hooks file.
 
 The hook reads a PostToolUse payload on stdin and prints nothing when it has
 nothing to report. Both payload shapes are worth running by hand — Codex names

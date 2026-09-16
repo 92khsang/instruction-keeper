@@ -57,7 +57,7 @@ jobs:
       - name: Hook tests
         run: python3 tests/test_hook_post_edit.py
 
-      # The plugin against its own standard: AGENTS.md plus .claude/CLAUDE.md.
+      # The plugin against its own standard: its own AGENTS.md and CLAUDE.md.
       - name: Instruction files
         run: python3 scripts/check_instructions.py --project-root .
 

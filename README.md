@@ -88,7 +88,8 @@ skill).
 
 Requires `python3` on `PATH` — the checker and the hook are standard library
 only, Python 3.8+. Without it the hook cannot start and the skills lose their
-deterministic half.
+deterministic half. This release is tested on Claude Code on Linux and macOS;
+see [Scope](#hosts-and-platforms) for what that leaves out.
 
 For one session, without installing:
 
@@ -210,6 +211,25 @@ reach for a script: whether a statement is inferable from the code, whether a
 incident behind it. **Silence from the checker is not approval.**
 
 ## Scope
+
+### Hosts and platforms
+
+0.1.0 targets **Claude Code on Linux and macOS**. That is what is tested: CI
+runs both suites on Python 3.8 and on the current release, on `ubuntu-latest`.
+
+**Windows is untested and not supported in this release.** Three things were
+reviewed by reading the code and never executed there: the hook runs `python3`
+in exec form, which needs a real executable of that name on `PATH`; the
+`--new-only` baseline takes a different directory under `os.name == "nt"`; and a
+`CLAUDE.md` symlinked to `AGENTS.md` needs Administrator privileges or Developer
+Mode. Any of the three may work — none has been shown to. Claiming otherwise
+would be the kind of unverified assertion this plugin exists to catch.
+
+The standard itself is written for `AGENTS.md` as the cross-agent file, and that
+premise stands. But nothing outside Claude Code is verified here, and no limit
+another tool places on `AGENTS.md` is checked.
+
+### Files
 
 The repository-root pair only — `AGENTS.md` plus `CLAUDE.md` or
 `.claude/CLAUDE.md`. The checker governs that pair and nothing else.

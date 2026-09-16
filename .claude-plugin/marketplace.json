@@ -10,7 +10,7 @@
     {
       "name": "instruction-keeper",
       "source": "./",
-      "description": "Keeps AGENTS.md and CLAUDE.md inside an evidence-based structure: a fixed section set, explicit admission tests for what may go in each section, and enforced length budgets. Requires python3 on PATH.",
+      "description": "Keeps AGENTS.md and CLAUDE.md inside an evidence-based structure: a fixed section set, explicit admission tests for what may go in each section, and enforced length budgets. Requires python3 on PATH; tested on Claude Code on Linux and macOS.",
       "version": "0.1.0",
       "author": {
         "name": "Hayes",

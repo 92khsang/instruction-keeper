@@ -151,9 +151,15 @@ using Claude Code-style names". It sets `CLAUDE_PLUGIN_ROOT` alongside its own
 Two things differ, and the plugin handles both rather than assuming:
 
 * Codex's command handler has no `args` array, only `command`, so
-  `hooks/hooks.json` writes one quoted string. An exec form would deserialize
-  there with the script dropped and bare `python3` left reading the payload as
-  a program.
+  `hooks/post-edit.json` writes one quoted string. An exec form would
+  deserialize there with the script dropped and bare `python3` left reading the
+  payload as a program.
+* The hooks file is **not** at `hooks/hooks.json`, deliberately. Codex loads no
+  hook unless the manifest names a file, and Claude Code loads
+  `hooks/hooks.json` by itself and treats `manifest.hooks` as *additional*
+  files — naming that path there fails the whole plugin with "Duplicate hooks
+  file detected". A declared file at any other path is the one layout both
+  accept.
 * Codex sets no `CLAUDE_PROJECT_DIR` and states patch paths relative to the
   working directory, so the hook takes the files from the `apply_patch`
   envelope and finds the repository root by walking up for `.git`, which is

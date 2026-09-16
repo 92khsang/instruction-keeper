@@ -1,6 +1,6 @@
 {
   "name": "instruction-keeper",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Keeps AGENTS.md and CLAUDE.md inside an evidence-based structure: a fixed section set, explicit admission tests for what may go in each section, and enforced length budgets checked against how Claude Code and Codex each load the files. Requires python3 on PATH; tested on Claude Code on Linux and macOS.",
   "author": {
     "name": "Hayes",
@@ -15,5 +15,5 @@
     "linting"
   ],
   "license": "MIT",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/post-edit.json"
 }

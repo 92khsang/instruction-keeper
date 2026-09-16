@@ -57,23 +57,29 @@ jobs:
       - name: Hook tests
         run: python3 tests/test_hook_post_edit.py
 
-      # The plugin against its own standard: AGENTS.md plus .claude/CLAUDE.md.
+      # The plugin against its own standard: its own AGENTS.md and CLAUDE.md.
       - name: Instruction files
         run: python3 scripts/check_instructions.py --project-root .
 
       # The hook config is executed the way a host executes it, rather than
       # only parsed by a test. The Codex form is the one at risk: its command is
-      # a single string, so a quoting mistake in hooks/hooks.json is invisible
-      # to every test that imports the script directly.
+      # a single string, so a quoting mistake in the hooks file is invisible to
+      # every test that imports the script directly. The path comes from the
+      # manifest, which is also the only place either runtime learns it.
       #
       # The run must assert output, not just a zero exit. If the command ever
       # lost its script argument -- an exec form would do exactly that under
       # Codex, which has no `args` -- bare `python3` would read the payload on
       # stdin, parse `{...}` as a dict literal, and exit 0 having done nothing.
-      - name: Hook command from hooks.json, both payload shapes
+      - name: Hook command from the declared hooks file, both payload shapes
         run: |
           set -eu
-          cmd="$(python3 -c "import json;print(json.load(open('hooks/hooks.json'))['hooks']['PostToolUse'][0]['hooks'][0]['command'])")"
+          cmd="$(python3 -c "
+          import json
+          declared = json.load(open('.claude-plugin/plugin.json'))['hooks']
+          assert declared.startswith('./'), declared
+          print(json.load(open(declared[2:]))['hooks']['PostToolUse'][0]['hooks'][0]['command'])
+          ")"
           export CLAUDE_PLUGIN_ROOT="$PWD"
           resolved="${cmd//\$\{CLAUDE_PLUGIN_ROOT\}/$CLAUDE_PLUGIN_ROOT}"
           echo "resolved command: $resolved"

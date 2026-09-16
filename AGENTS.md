@@ -12,9 +12,11 @@ CLAUDE.md standard and ships the checker, skills, agent and hook that apply it.
 - The hook never blocks and never raises. It exits 0 on every path, reports
   through `hookSpecificOutput.additionalContext`, and keeps `systemMessage` to
   one line because that field reaches the user and not the model.
-- One hooks file serves both runtimes. Codex has no `args` array, so the
-  command stays a single quoted string, and `hooks` must stay declared in the
-  manifest because Codex has no default path for it.
+- One hooks file serves both runtimes, and its path is load-bearing. Codex
+  reads no hook unless the manifest names a file; Claude Code auto-loads
+  `hooks/hooks.json` and rejects a manifest that names it too. So the file
+  stays declared and stays off that path. Codex has no `args` array either, so
+  the command stays a single quoted string.
 - A check belongs in the checker only when it is deterministic and
   high-precision. Judgment — whether a linter already enforces a rule, whether
   a line is inferable from the code — belongs to the audit skill and the
@@ -44,14 +46,16 @@ the `claude` CLI.
 python3 tests/test_check_instructions.py
 python3 tests/test_hook_post_edit.py
 python3 scripts/check_instructions.py --project-root .
-claude plugin validate --strict .claude-plugin/plugin.json
+claude plugin validate .claude-plugin/plugin.json
 claude plugin validate --strict .claude-plugin/marketplace.json
 ```
 
-Name the manifest you mean: `claude plugin validate --strict .` checks only the
-marketplace file once one exists. The plugin form warns on any `CLAUDE.md` at a
-plugin root — hence the stub at `.claude/CLAUDE.md` — and on a local, gitignored
-`CLAUDE.local.md`, which a clean checkout does not have.
+Name the manifest you mean: `--strict .` checks only the marketplace file. The
+plugin form drops `--strict` because it warns on this repository's own
+`CLAUDE.md`, and on a gitignored `CLAUDE.local.md` when one is there; both are
+expected and any other warning is not. Neither call catches a hook that fails to
+load — `claude plugin list` does, so run it after touching the manifest or the
+hooks file.
 
 The hook reads a PostToolUse payload on stdin and prints nothing when it has
 nothing to report. Both payload shapes are worth running by hand — Codex names

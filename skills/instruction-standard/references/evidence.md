@@ -244,6 +244,13 @@ from the same revision, and from
 - `resolve_manifest_hooks` returns `None` when the manifest omits `hooks`, so a
   plugin must declare the path. `plugin_skill_roots` does fall back to
   `<plugin_root>/skills`, so skills are discovered.
+- **The two runtimes constrain the hooks path in opposite directions, and only
+  one layout satisfies both.** Claude Code auto-loads `hooks/hooks.json` and
+  treats `manifest.hooks` as additional files; declaring that path fails the
+  plugin outright — *observed:* `claude plugin list` reported
+  `✘ failed to load — Duplicate hooks file detected`, and every hook was lost.
+  Codex loads nothing undeclared. A declared file at any other path works in
+  both, verified by installing the same directory into each.
 - Model-visible hook output defaults to roughly 2,500 tokens before spilling to
   disk, against Claude Code's 10,000-character cap.
 - Codex subagents are TOML files under `.codex/agents/` requiring `name`,

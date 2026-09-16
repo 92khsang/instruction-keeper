@@ -5,20 +5,25 @@ it is **when does this need to be in context**, not how important it is.
 
 ## Loading behaviour, in order of decreasing cost
 
+Everything below except the nested pair is a Claude Code mechanism. Codex has
+only two: the root `AGENTS.md`, and a nested `AGENTS.md` for sessions working in
+that directory.
+
 | Mechanism | When it loads | Cost profile |
 |---|---|---|
 | `AGENTS.md` via `CLAUDE.md` import | every session, in full, at launch | highest — pays on every request |
 | `.claude/rules/*.md` **without** `paths:` | every session, same priority as `.claude/CLAUDE.md` | identical to the above; purely an organizational split |
 | `.claude/rules/*.md` **with** `paths:` | only when Claude reads a matching file | resident only while relevant |
-| Nested `CLAUDE.md` in a subdirectory, importing the `AGENTS.md` beside it | when Claude reads files in that directory | resident only while relevant |
+| Nested `AGENTS.md` + `CLAUDE.md` in a subdirectory | Claude Code: when Claude reads files there. Codex: when the session's working directory is at or below it | resident only while relevant, in both |
 | Skill (`.claude/skills/<name>/SKILL.md` in a project) | name + description in the skill listing; body on invocation; supporting files on demand | near-zero until used |
 | Hook | never in context | zero, and it is enforcement rather than a request |
 | `docs/`, `CONTRIBUTING.md` | only when explicitly read | zero |
 
 The single most common mistake is believing `@path` imports reduce context.
-They do not — imported files load at launch. Splitting a file into imports
-de-duplicates maintenance, not tokens. Only path scoping, nesting, and skills
-actually defer loading.
+They do not — in Claude Code imported files load at launch, and in Codex they do
+not load at all: the `@path` line is passed through as text and the file it
+names is never opened. Splitting a file into imports de-duplicates maintenance,
+not tokens. Only path scoping, nesting, and skills actually defer loading.
 
 ## Routing table
 
@@ -69,16 +74,19 @@ relevant, it belongs in `AGENTS.md`; if it is not, give it a `paths:` list.
   help; one 80-line file per package is neither.
 - Write both files. Claude Code discovers `CLAUDE.md` in subdirectories under
   the working directory and includes it when it reads files there; it never
-  reads an `AGENTS.md` at any level. The nested `CLAUDE.md` is one line,
-  `@AGENTS.md`, which resolves relative to itself:
+  reads an `AGENTS.md` at any level. Codex is the mirror image: it collects one
+  file per directory from the project root down to the working directory and
+  never reads a `CLAUDE.md`. The nested `CLAUDE.md` is one line, `@AGENTS.md`,
+  which resolves relative to itself:
 
 ```text
 packages/api/AGENTS.md    the package's rules
 packages/api/CLAUDE.md    one line: @AGENTS.md
 ```
 
-A nested `AGENTS.md` on its own defers loading for agents that read
-`AGENTS.md`, and delivers nothing at all to Claude Code.
+Either file on its own defers loading for exactly one runtime and delivers
+nothing at all to the other. The checker reports the missing half as
+`NESTED_NO_CLAUDE` or `NESTED_NO_AGENTS`.
 
 ### → `docs/`, linked from `## Pointers`
 

@@ -1,6 +1,6 @@
 ---
 name: split
-description: This skill should be used when a substantial instruction file already exists and the user asks to "split my CLAUDE.md", "move CLAUDE.md into AGENTS.md", "migrate to AGENTS.md", "make my CLAUDE.md work with other coding agents", "my CLAUDE.md is too long, restructure it", or runs /instruction-keeper:split. It migrates the existing content into the AGENTS.md plus CLAUDE.md-stub pair, reorganizes it into the standard's section set, and routes what does not belong there to a skill, a path-scoped rule, or docs/. Use the audit skill instead when the user wants findings rather than a rewrite, and the init skill when there is no existing file whose content must be preserved.
+description: This skill should be used when a substantial instruction file already exists and the user asks to "split my CLAUDE.md", "move CLAUDE.md into AGENTS.md", "migrate to AGENTS.md", "make my CLAUDE.md work with Codex", "make my CLAUDE.md work with other coding agents", "my CLAUDE.md is too long, restructure it", or runs /instruction-keeper:split. It migrates the existing content into the AGENTS.md plus CLAUDE.md-stub pair, reorganizes it into the standard's section set, and routes what does not belong there to a skill, a path-scoped rule, or docs/. Use the audit skill instead when the user wants findings rather than a rewrite, and the init skill when there is no existing file whose content must be preserved.
 argument-hint: "[optional: path to the file to split, defaults to CLAUDE.md]"
 allowed-tools:
   - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py":*)
@@ -30,11 +30,13 @@ Whenever either file of the pair exists, the first line of the output is the
 budget, on a clean run too:
 
 ```
-instruction-keeper: 412 lines / 19.4 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 412 lines / 19.4 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 21.8 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 ```
 
-That is the "before" number, and it covers the `AGENTS.md` and `CLAUDE.md`
-import closures together. Keep it; step 5 reports the "after" against it.
+Those are the "before" numbers. The first covers the `AGENTS.md` and `CLAUDE.md`
+import closures together; the second is raw bytes on disk, which is what Codex
+concatenates and truncates. Keep both; step 5 reports the "after" against them.
 
 Read the source file in full. Read any file it imports with `@`, to the full
 depth — the import closure is what actually loads, and content hiding behind an
@@ -153,13 +155,20 @@ is not a tighter root file. Give the package a nested pair of its own: an
 
 Both halves are needed, and for different readers. Claude Code reads `CLAUDE.md`
 and never `AGENTS.md`, at any level; it discovers a nested `CLAUDE.md` under the
-working directory and includes it when it reads files in that directory, so the
-nested `CLAUDE.md` is the half that makes the package's rules reach Claude at
-all. A nested `AGENTS.md` on its own reaches coding agents that read `AGENTS.md`
-and reaches Claude Code never. This, like a path-scoped rule, actually reduces
-context: an `@path` import does not, because imported files load at launch.
+working directory and includes it when it reads files in that directory. Codex
+is the mirror image: it walks from the project root down to the working
+directory, takes one file per directory, and never reads a `CLAUDE.md`. A nested
+`AGENTS.md` alone reaches Codex and never Claude; a nested `CLAUDE.md` alone
+reaches Claude and never Codex. The checker reports each case as
+`NESTED_NO_CLAUDE` or `NESTED_NO_AGENTS`.
 
-The checker governs the repository-root pair only. It does not check nested
-pairs, so say so when you propose one — its silence about the package directory
-is not approval. Propose the split explicitly rather than compressing the root
-further.
+This, like a path-scoped rule, actually reduces context for both runtimes: the
+root file is in every Codex chain and loads at launch for Claude Code, while a
+package file loads only for work in that package. An `@path` import reduces
+nothing — in Claude Code imported files load at launch, and in Codex they do not
+load at all.
+
+The checker verifies that a nested pair exists and that the stub imports its
+sibling. It does not run the section, cap or content checks on nested files, so
+say which of the two you mean rather than letting its silence read as approval
+of what the package file says.

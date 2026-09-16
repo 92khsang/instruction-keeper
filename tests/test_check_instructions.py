@@ -1211,6 +1211,21 @@ class TestCli(CliCase):
         )
         self.assertIn("no findings", out)
 
+    def test_the_budget_line_names_a_host_and_a_unit_per_runtime(self):
+        # The two runtimes are measured in different units, and a reader who
+        # cannot tell which number is which will quote the wrong one.
+        self._pair()
+        _, out, _ = self.cli()
+        claude_line, codex_line = out.splitlines()[0], out.splitlines()[1]
+        self.assertIn(ci.CLAUDE_CODE.label, claude_line)
+        self.assertIn("lines", claude_line)
+        self.assertIn(ci.CODEX.label, codex_line)
+        # KiB, not KB: project_doc_max_bytes is a binary quantity and the
+        # documentation states it as 32 KiB.
+        self.assertIn("KiB", codex_line)
+        self.assertIn(
+            "limit %d KiB" % (ci.CODEX_DEFAULT_MAX_BYTES // 1024), codex_line)
+
     def test_failure_exits_one(self):
         self._pair(claude="Use plan mode.\n")
         code, out, _ = self.cli()
@@ -1384,6 +1399,19 @@ class TestShippedTemplate(BaseCase):
             "the template's resolved closure must start under the %d-line target"
             % ci.AGENTS_TARGET_LINES,
         )
+        self.assertNotIn("CODEX_COMMENT_COST", codes)
+        self.assertNotIn("CODEX_IMPORT_LITERAL", codes)
+
+    def test_template_carries_no_html_comments(self):
+        # Claude Code strips block comments; Codex does not, and reads them as
+        # instructions. A skeleton that ships guidance in comments would hand
+        # every Codex user a file with the defect this plugin exists to catch.
+        template = PLUGIN_ROOT / "assets" / "AGENTS.md.template"
+        text = template.read_text(encoding="utf-8")
+        self.assertNotIn("<!--", text)
+        scan = ci.scan_block_comments(text)
+        self.assertEqual(scan.removed, set())
+        self.assertEqual(scan.unclosed, None)
 
 
 # --------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 # instruction-keeper
 
 A Claude Code plugin that keeps `AGENTS.md` and `CLAUDE.md` inside a fixed
-structure with explicit admission tests and enforced length budgets.
+structure with explicit admission tests and enforced length budgets, checked
+against how Claude Code and Codex each actually load them.
 
 Instruction files grow monotonically, and two separate studies say what they
 grow into. This plugin's own survey of 195 files across 176 well-known open
@@ -25,11 +26,18 @@ Use plan mode for changes under `src/billing/`.
 ```
 
 Claude Code reads `CLAUDE.md`, not `AGENTS.md`, so the import is what makes the
-shared file reach Claude; coding agents that follow the AGENTS.md convention
-read `AGENTS.md` directly. The import de-duplicates maintenance, not tokens. In
-Claude Code an `@path` import loads at launch, resolves relative to the file
-that contains it, and recurses at most four hops — so there is one budget and
-it covers the pair.
+shared file reach Claude; Codex and other agents that follow the AGENTS.md
+convention read `AGENTS.md` directly and never open the stub. The import
+de-duplicates maintenance, not tokens.
+
+**`@`-imports are a Claude Code mechanism and nothing else.** In Claude Code an
+`@path` import loads at launch, resolves relative to the file that contains it,
+and recurses at most four hops — so there is one budget and it covers the pair.
+Codex has no import mechanism at all: it passes the `@path` line to the model as
+literal text and never reads the file it names. That makes the stub the one
+place an import belongs, because it is the one file Codex does not read. An
+import inside `AGENTS.md` is a portability defect, and the checker reports it as
+`CODEX_IMPORT_LITERAL`.
 
 Five sections, this order. `Rules` and `Commands` are expected: the checker
 warns `MISSING_RULES` and `MISSING_COMMANDS` when either is absent. A warning,
@@ -49,15 +57,25 @@ assuming. The other three sections are omit-if-empty.
 Total budget: **120 lines target, 200 warns, 400 fails**. It is measured over
 the union of the `AGENTS.md` and `CLAUDE.md` `@`-import closures,
 de-duplicated, after block-level HTML comments are stripped — Claude Code
-removes those before injecting the file, so they cost nothing and are free for
-maintainer notes. `CLAUDE.md` itself: 10 lines, hard fail past 20.
+removes those before injecting the file. `CLAUDE.md` itself: 10 lines, hard fail
+past 20.
 
-The two measurements differ on purpose. The closure budget counts **every
-line, blanks included**, because a blank line occupies context like any other.
-The per-section caps in the table and the `CLAUDE.md` cap count **non-blank
-lines only**, and the per-section caps **include fenced code** — a fenced block
-fills a section exactly as much as the same number of bullets, and `Commands`
-and `Boundaries` are where that volume collects.
+There is a second budget, because the two runtimes load different bytes.
+**Codex reads `AGENTS.md` as it sits on disk** and stops at
+`project_doc_max_bytes`, 32 KiB by default, cutting on a byte boundary and
+saying nothing. Nothing is stripped on the way: an HTML comment costs its own
+length and is read by the model as part of the instructions, and an unexpanded
+`@path` line costs what it occupies while delivering nothing. So a comment is
+free in Claude Code and billed in Codex, and a comment-heavy file that passes
+the line budget can still be reported as `CODEX_COMMENT_COST`.
+
+The measurements differ on purpose, in three ways. The closure budget counts
+**every line, blanks included**, because a blank line occupies context like any
+other. The Codex budget counts **raw bytes on disk**, because that is what Codex
+concatenates. The per-section caps in the table and the `CLAUDE.md` cap count
+**non-blank lines only**, and the per-section caps **include fenced code** — a
+fenced block fills a section exactly as much as the same number of bullets, and
+`Commands` and `Boundaries` are where that volume collects.
 
 Three tests decide every line: is it true in **every** session, would an agent
 reach it by **reading the repository**, and would **removing** it cause a
@@ -127,7 +145,7 @@ loads bytes from disk:
 
 ```
 instruction-keeper: Claude Code loads 18 lines / 0.3 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
-instruction-keeper: Codex loads 0.3 KB over AGENTS.md (limit 32 KB, truncated silently past it).
+instruction-keeper: Codex loads 0.3 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 instruction-keeper: no findings.
 ```
 
@@ -150,7 +168,7 @@ warning threshold, and still pass CI:
 
 ```
 instruction-keeper: Claude Code loads 247 lines / 4.3 KB over AGENTS.md, extra.md, CLAUDE.md (target 120, warn 200, fail 400).
-instruction-keeper: Codex loads 4.1 KB over AGENTS.md (limit 32 KB, truncated silently past it).
+instruction-keeper: Codex loads 4.1 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 
 WARN  AGENTS.md  [SIZE_WARN]
       247 lines / 4.3 KB (resolved over 3 files: AGENTS.md, extra.md, CLAUDE.md). Over the 200-line warning threshold; the target is 120.
@@ -192,16 +210,30 @@ silent.
 It verifies:
 
 - size over the union closure, and the per-section and `CLAUDE.md` caps;
+- size over the Codex chain — raw bytes on disk from the repository root down to
+  each directory that contributes a file, against `project_doc_max_bytes`.
+  `project_doc_max_bytes` and `project_doc_fallback_filenames` are read from
+  `.codex/config.toml` when it exists, so a repository that raised the limit is
+  measured against its own. A chain is not reported when an ancestor of it
+  already was: one oversized root file is one defect, not one per package;
+- the nested pairs, because the two runtimes read nested files as exact
+  opposites — `NESTED_NO_CLAUDE`, `NESTED_NO_AGENTS`, `NESTED_NOT_STUB`;
+- what each runtime does with the markup: an `@path` inside a file Codex reads
+  is `CODEX_IMPORT_LITERAL`, since Codex delivers the line and not the file;
+  block comments past a quarter of a file are `CODEX_COMMENT_COST`, since Codex
+  neither strips them nor hides them from the model; an `AGENTS.override.md`
+  beside an `AGENTS.md` is `AGENTS_OVERRIDE_SHADOW`, since Codex takes the first
+  name it finds in a directory and never looks at the rest;
 - the section allowlist, the section order, duplicate and unknown headings, and
   headings that are synonyms of a known section;
 - the `CLAUDE.md` stub contract — import present, copy-instead-of-import,
   broken symlink, stub length. `.claude/CLAUDE.md` counts as the project file,
   and `CLAUDE_NO_IMPORT` matches the resolved target rather than the basename,
   so a `.claude/CLAUDE.md` must write `@../AGENTS.md`;
-- `@`-import integrity: a target that does not exist is `IMPORT_MISSING`, and
-  one resolving outside the repository is the `IMPORT_EXTERNAL` note, because
-  Claude Code asks the user to approve an external import and loads nothing if
-  they decline;
+- `@`-import integrity in Claude Code: a target that does not exist is
+  `IMPORT_MISSING`, and one resolving outside the repository is the
+  `IMPORT_EXTERNAL` note, because Claude Code asks the user to approve an
+  external import and loads nothing if they decline;
 - link and path resolution **inside `Pointers` and `Boundaries` only** — no
   other section is scanned for paths, paths resolve relative to the file that
   contains them, and `mailto:` links, URL routes and branch names are not
@@ -234,36 +266,57 @@ incident behind it. **Silence from the checker is not approval.**
 
 ### Hosts and platforms
 
-0.1.0 targets **Claude Code on Linux and macOS**. That is what is tested: CI
-runs both suites on Python 3.8 and on the current release, on `ubuntu-latest`.
+Two things have different scopes here, and conflating them would be the kind of
+unverified assertion this plugin exists to catch.
 
-**Windows is untested and not supported in this release.** Three things were
-reviewed by reading the code and never executed there: the hook runs `python3`
-in exec form, which needs a real executable of that name on `PATH`; the
-`--new-only` baseline takes a different directory under `os.name == "nt"`; and a
-`CLAUDE.md` symlinked to `AGENTS.md` needs Administrator privileges or Developer
-Mode. Any of the three may work — none has been shown to. Claiming otherwise
-would be the kind of unverified assertion this plugin exists to catch.
+**Where the plugin runs: Claude Code on Linux and macOS.** That is what is
+tested — CI runs both suites on Python 3.8 and on the current release, on
+`ubuntu-latest` — and the hook, skills and agent are Claude Code components.
 
-The standard itself is written for `AGENTS.md` as the cross-agent file, and that
-premise stands. But nothing outside Claude Code is verified here, and no limit
-another tool places on `AGENTS.md` is checked.
+**What the checker models: Claude Code and Codex.** Both loading rules are
+implemented and both are reported on every run. The Codex rules come from
+OpenAI's documentation and, where the documentation is silent, from reading
+`codex-rs/core/src/agents_md.rs` at revision `main` on 2026-09-16. They have not
+been confirmed against a running Codex session, and two of them are negative
+claims — that no import is expanded and no comment is stripped — which no
+documentation page states either way.
+`skills/instruction-standard/references/evidence.md` records which facts came
+from which, and that distinction is the point: a source reading of one revision
+is weaker evidence than a documented guarantee, and both are stronger than
+memory.
+
+**Windows is untested and not supported.** Three things were reviewed by reading
+the code and never executed there: the hook runs `python3` in exec form, which
+needs a real executable of that name on `PATH`; the `--new-only` baseline takes
+a different directory under `os.name == "nt"`; and a `CLAUDE.md` symlinked to
+`AGENTS.md` needs Administrator privileges or Developer Mode. Any of the three
+may work — none has been shown to.
 
 ### Files
 
-The repository-root pair only — `AGENTS.md` plus `CLAUDE.md` or
-`.claude/CLAUDE.md`. The checker governs that pair and nothing else.
+The repository-root pair — `AGENTS.md` plus `CLAUDE.md` or `.claude/CLAUDE.md` —
+and every nested pair below it.
 
-A monorepo package that needs its own instructions gets **two** files, not one:
-a nested `AGENTS.md` covering what differs in that package, and a nested
-`CLAUDE.md` beside it whose content is the import of that `AGENTS.md`. Claude
-Code discovers a nested `CLAUDE.md` under the working directory and loads it on
-demand when it reads files in that directory; it never reads an `AGENTS.md` at
-any level. Without the nested stub, the package file reaches agents that read
-`AGENTS.md` but never reaches Claude Code. Splitting this way is also the fix
-when the root file
-cannot fit the budget — but the checker still looks only at the root pair, so
-nested files are yours to keep honest.
+**Below the root the two runtimes are exact opposites.** Claude Code discovers a
+nested `CLAUDE.md` under the working directory and loads it on demand when it
+reads files in that directory; it never reads an `AGENTS.md` at any level. Codex
+walks from the project root down to the working directory and loads one file per
+directory — `AGENTS.override.md`, then `AGENTS.md`, then any configured
+fallback — and never reads a `CLAUDE.md`.
+
+So a monorepo package that needs its own instructions gets **two** files, not
+one: a nested `AGENTS.md` covering what differs in that package, and a nested
+`CLAUDE.md` beside it whose content is the import of that `AGENTS.md`. With only
+the first, the package instructions never reach Claude Code
+(`NESTED_NO_CLAUDE`); with only the second, they never reach Codex
+(`NESTED_NO_AGENTS`); with both but no import between them, the two runtimes
+read different text (`NESTED_NOT_STUB`). A symlink from the stub to its sibling
+satisfies the contract the same way it does at the root.
+
+Splitting this way is also the fix when the root file cannot fit a budget, and
+for Codex it is the only fix that works: the root file is in every chain, so
+what sits there is loaded by every session in the repository, while a package
+file is loaded only by sessions working in that package.
 
 ## Spec Kit interop
 

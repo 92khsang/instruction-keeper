@@ -114,14 +114,19 @@ session shell's working directory moves whenever a command runs `cd`, and a bare
 instruction pair inside a subdirectory — where Claude Code will then load the
 nested `CLAUDE.md` on demand every time it reads a file in that directory.
 
-Start from `${CLAUDE_PLUGIN_ROOT}/assets/AGENTS.md.template`. Every non-comment
-line in it is sample content from the standard's worked example — replace all of
-it. Delete any section whose sample cannot be replaced with something
-repository-specific; an empty heading invites padding later. The guidance
-comments are block-level HTML comments and cost no context, so keep or drop them
-as the user prefers, but never ship a line mentioning `ACME`, `pnpm`,
-`src/db/generated` or `acme-billing` that was not confirmed against this
+Start from `${CLAUDE_PLUGIN_ROOT}/assets/AGENTS.md.template`. Every line in it is
+sample content from the standard's worked example — replace all of it. Delete
+any section whose sample cannot be replaced with something repository-specific;
+an empty heading invites padding later. Never ship a line mentioning `ACME`,
+`pnpm`, `src/db/generated` or `acme-billing` that was not confirmed against this
 repository.
+
+The template carries no guidance comments, deliberately. Claude Code strips
+block-level HTML comments before injection, but Codex does not, so a comment
+left in a shipped file is read by that model as part of the instructions. The
+per-section caps and admission tests are in
+`${CLAUDE_PLUGIN_ROOT}/skills/instruction-standard/references/section-criteria.md`;
+read it rather than reproducing it into the file.
 
 Then write `${CLAUDE_PROJECT_DIR}/CLAUDE.md`:
 
@@ -144,14 +149,16 @@ under `context_files` to keep them in sync.
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py" --project-root "${CLAUDE_PROJECT_DIR}"
 ```
 
-The first line of the output is always the budget, on a clean run too:
+The output opens with one budget line per host, on a clean run too:
 
 ```
-instruction-keeper: 12 lines / 0.2 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 12 lines / 0.2 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 0.2 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 ```
 
-Quote it rather than counting lines yourself, and say that the figure covers the
-`AGENTS.md` and `CLAUDE.md` import closures together. Then list every command
+Quote both rather than counting anything yourself. Say that the first figure
+covers the `AGENTS.md` and `CLAUDE.md` import closures together, and that the
+second is raw bytes on disk, which is what Codex concatenates. Then list every command
 that was written, and state plainly which commands were **not** verified by
 running them. Offer to run them.
 

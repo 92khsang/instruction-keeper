@@ -24,9 +24,11 @@ Use plan mode for changes under `src/billing/`.
 ```
 
 Claude Code reads `CLAUDE.md`, not `AGENTS.md`, so the import is what makes the
-shared file reach Claude. Coding agents that follow the `AGENTS.md` convention
-read `AGENTS.md` directly, which is why the content lives there rather than in
-`CLAUDE.md`.
+shared file reach Claude. Codex and other agents that follow the `AGENTS.md`
+convention read `AGENTS.md` directly and never open the stub, which is why the
+content lives there rather than in `CLAUDE.md`. Codex in particular reads no
+`CLAUDE.md` at all in a default installation: `project_doc_fallback_filenames`
+is empty, so anything left in the stub is Claude Code's alone.
 
 Three consequences that are easy to get wrong:
 
@@ -43,26 +45,34 @@ Three consequences that are easy to get wrong:
   not. Anything another agent would also need belongs in `AGENTS.md`.
 
 A symlink (`ln -s AGENTS.md CLAUDE.md`) works when no Claude-specific content is
-needed, but on Windows it needs Administrator privileges or Developer Mode.
-Prefer the import.
+needed, at the repository root and in a package alike, but on Windows it needs
+Administrator privileges or Developer Mode. Prefer the import.
 
 ### `@`-imports inside `AGENTS.md`
 
-This standard neither recommends nor forbids them. The mechanics for Claude
-Code, so the decision is made on facts:
+**Do not use them.** An import is a Claude Code mechanism, and `AGENTS.md` is
+the file the other agents read.
 
-- An `@path` import is expanded and loaded at launch, so it costs exactly what
-  pasting the file in would cost. Splitting a file into imports organizes it; it
-  does not reduce context.
-- Paths resolve relative to the file containing the import, not the working
-  directory, and imports recurse to a maximum of four hops.
-- Import parsing skips Markdown code spans and fenced code blocks, so a path in
-  backticks is text rather than an import.
-- An import in a project memory file whose path resolves outside the working
-  directory is external: Claude Code shows a one-time approval dialog, and loads
-  nothing from it if the user declines.
+In Claude Code an `@path` import is expanded and loaded at launch, so it costs
+exactly what pasting the file in would cost — splitting a file into imports
+organizes it, it does not reduce context. Paths resolve relative to the file
+containing the import rather than the working directory, imports recurse to a
+maximum of four hops, and parsing skips Markdown code spans and fenced code
+blocks, so a path in backticks is text rather than an import. An import whose
+path resolves outside the working directory is external: Claude Code shows a
+one-time approval dialog and loads nothing from it if the user declines.
 
-The budget below is measured over the whole closure for exactly this reason.
+Codex has no equivalent. It reads the bytes on disk, so an `@path` line arrives
+at the model as literal text and the file it names is never opened. The reader
+sees a reference to instructions that are not there, which is worse than not
+mentioning them. The checker reports this as `CODEX_IMPORT_LITERAL`.
+
+The stub is the exception, and the only one. `CLAUDE.md` exists to hold
+`@AGENTS.md`, and it is the one file Codex does not read, so the mechanism and
+the file that uses it are matched.
+
+The Claude Code budget below is measured over the whole closure for exactly this
+reason.
 
 ## The section set
 
@@ -95,18 +105,33 @@ examples, and the exact content that must be kept out of it.
 
 ## Length budget
 
-Measured over the resolved `@`-import closure of the pair — the union of what
-`AGENTS.md` and `CLAUDE.md` pull in, de-duplicated — after stripping block-level
-HTML comments. Claude Code removes those before injecting the file, so they cost
-nothing and are free for maintainer notes.
+There are two, because the runtimes load different bytes.
+
+**Claude Code** — measured over the resolved `@`-import closure of the pair, the
+union of what `AGENTS.md` and `CLAUDE.md` pull in, de-duplicated, after
+stripping block-level HTML comments, which Claude Code removes before injecting
+the file.
 
 - Target **120 lines**, warn at **200**, fail at **400**.
 - `CLAUDE.md`: 10 lines, hard fail past 20.
+
+**Codex** — measured in raw bytes on disk over the chain of files from the
+repository root down to a working directory, with nothing stripped and nothing
+expanded.
+
+- `project_doc_max_bytes`, **32 KiB** by default, configurable in
+  `.codex/config.toml`.
+- Past it Codex cuts on a byte boundary, mid-line, and says nothing. That is why
+  it is a hard failure where the Claude Code warning threshold is not: a file
+  past 200 lines still loads whole.
 
 The units differ on purpose. Say which one you are quoting:
 
 - The closure budget counts **every line, blank lines included**, because a
   blank line occupies context like any other.
+- The Codex budget counts **raw bytes on disk**, so a block comment costs its
+  own length there while costing nothing in Claude Code, and an unexpanded
+  `@path` line costs what it occupies while delivering nothing.
 - Per-section caps and the `CLAUDE.md` cap count **non-blank lines only**, and
   per-section caps **include fenced code**: a 40-line command block fills
   `Commands` exactly as much as 40 bullets do.
@@ -126,13 +151,20 @@ packages/api/AGENTS.md    the package's rules
 packages/api/CLAUDE.md    one line: @AGENTS.md
 ```
 
-Both files are needed. Claude Code discovers `CLAUDE.md` in subdirectories under
-the working directory and includes it when it reads files in that directory; it
-never reads an `AGENTS.md` at any level. Without the nested `CLAUDE.md` the
-package file reaches every other agent and never reaches Claude.
+Both files are needed, because below the root the two runtimes are exact
+opposites. Claude Code discovers `CLAUDE.md` in subdirectories under the working
+directory and includes it when it reads files in that directory; it never reads
+an `AGENTS.md` at any level. Codex walks from the project root down to the
+working directory and takes one file per directory — `AGENTS.override.md`, then
+`AGENTS.md`, then any configured fallback — and never reads a `CLAUDE.md`.
 
-This standard's checker governs only the repository-root pair. Nested pairs are
-a legitimate pattern it deliberately leaves alone.
+So each file alone is invisible to exactly one runtime, and the checker says
+which: `NESTED_NO_CLAUDE`, `NESTED_NO_AGENTS`, and `NESTED_NOT_STUB` when both
+exist but carry separate text.
+
+For Codex this is the only way to fix a root file that will not fit. The root
+file is in every chain, so what sits there is loaded by every session in the
+repository; a package file is loaded only by sessions working in that package.
 
 ## The three tests that decide every line
 
@@ -211,20 +243,24 @@ Flags: `--json` for machine output, `--quiet-info` to hide notes (it applies to
 JSON output too), `--new-only` to report only findings not seen on the previous
 run.
 
-Whenever either file of the pair exists, the run prints one budget line first,
-a clean run included:
+Whenever either file of the pair exists, the run prints one budget line per
+host first, a clean run included:
 
 ```text
-instruction-keeper: 12 lines / 0.2 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 12 lines / 0.2 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 0.2 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 ```
 
 The same numbers are in `--json` under `metrics`: `resolved_lines`,
-`resolved_bytes`, `raw_bytes` and `closure_files`. Quote that line when
-reporting size to a user instead of counting lines by hand.
+`resolved_bytes`, `raw_bytes` and `closure_files` for the first,
+`codex_chain_bytes`, `codex_chain_files` and `codex_max_bytes` for the second.
+Quote both when reporting size to a user instead of counting anything by hand.
+Each finding also carries a `host` field naming the runtime it concerns, or
+`null` when it concerns both.
 
-The checker verifies size over the closure, the section allowlist and order,
-per-section caps, link and path resolution, and a few high-precision content
-heuristics. One of those touches linter overlap: `LINT_LEAKAGE` is a
+The checker verifies size for both hosts, the section allowlist and order,
+per-section caps, link and path resolution, the nested pairs, and a few
+high-precision content heuristics. One of those touches linter overlap: `LINT_LEAKAGE` is a
 deliberately narrow keyword match that fires only when a formatter config exists
 in the repository, and it catches the most literal instances and nothing
 subtler. It **cannot** judge enforcement in general — whether *this* rule is
@@ -243,7 +279,8 @@ file:
 
 - Add a line only when an incident is behind it — a mistake made twice, a review
   catch, a correction retyped. Record the incident in an HTML comment beside the
-  line; block-level comments are stripped before injection and cost nothing.
+  line; Claude Code strips block-level comments before injection, though Codex
+  does not, so keep them short and write them for a reader who may see them.
 - When asked to review or update the file, bias toward deletion. If the agent
   already does the right thing without a line, propose removing it and say so,
   rather than leaving it in place by default.
@@ -256,5 +293,7 @@ file:
   belongs somewhere else, with the mechanism's loading behaviour.
 - **`references/evidence.md`** — the survey and first-party sources behind every
   number in this standard, and an explicit list of what is unproven.
-- **`${CLAUDE_PLUGIN_ROOT}/assets/AGENTS.md.template`** — a conforming skeleton
-  carrying each section's admission test in a stripped HTML comment.
+- **`${CLAUDE_PLUGIN_ROOT}/assets/AGENTS.md.template`** — a conforming
+  skeleton. The admission tests are in `references/section-criteria.md` rather
+  than in the file, because a comment that is free in Claude Code is read as an
+  instruction in Codex.

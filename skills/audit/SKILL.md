@@ -48,23 +48,32 @@ that reused it would hide everything the hook has already reported once. Expect
 to surface findings the user has seen in passing; a report is supposed to be
 complete.
 
-Whenever either file of the pair exists, the text output begins with one
-budget line, on a clean run too:
+Whenever either file of the pair exists, the text output begins with one budget
+line per host, on a clean run too:
 
 ```
-instruction-keeper: 12 lines / 0.2 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 12 lines / 0.2 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 0.2 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 ```
 
-Under `--json` the same figures are `metrics.resolved_lines`,
-`metrics.resolved_bytes` and `metrics.closure_files`. The count is the union of
-the `AGENTS.md` and `CLAUDE.md` `@`-import closures, de-duplicated, with
-block-level HTML comments stripped and blank lines counted, because blank lines
-occupy context too.
+There are two because the runtimes load different bytes. The first is
+`metrics.resolved_lines`, `metrics.resolved_bytes` and `metrics.closure_files`
+under `--json`: the union of the `AGENTS.md` and `CLAUDE.md` `@`-import
+closures, de-duplicated, with block-level HTML comments stripped and blank lines
+counted, because blank lines occupy context too. The second is
+`metrics.codex_chain_bytes`, `metrics.codex_chain_files` and
+`metrics.codex_max_bytes`: raw bytes on disk over the chain of files Codex
+concatenates, with nothing stripped and nothing expanded. Report both; a file
+can be comfortably inside one and past the other.
 
-Beyond that size, the checker verifies the section allowlist and order,
-per-section caps, link and path resolution, the `CLAUDE.md` stub contract
-including copy-instead-of-import, Spec Kit marker integrity, and a small set of
-high-precision content heuristics. Treat its output as established fact.
+Every finding carries a `host` field naming the runtime it concerns, or `null`
+when it concerns both. Quote it — "this reaches Codex truncated" and "this never
+reaches Claude" are different problems with different fixes.
+
+Beyond size, the checker verifies the section allowlist and order, per-section
+caps, link and path resolution, the `CLAUDE.md` stub contract including
+copy-instead-of-import, the nested pairs, Spec Kit marker integrity, and a small
+set of high-precision content heuristics. Treat its output as established fact.
 
 ## Step 3: Apply the judgment checks the checker does not make
 
@@ -144,9 +153,13 @@ region must be carried verbatim and never edited across a marker.
   in general, inferability, and whether a `Boundaries` entry is a responsibility
   or an inventory are judgments it does not attempt. Say which checks were
   automated and which were read by hand.
-- The checker governs the repository-root pair only. A nested pair in a monorepo
-  package is outside its scope, so say so rather than letting its silence read as
-  approval of the whole tree.
+- The checker checks nested pairs for existence and for the import between them,
+  not for their content: the section, cap and heuristic checks run on the root
+  pair alone. Say which of the two you mean rather than letting silence about a
+  package's content read as approval of it.
+- At most ten findings per code are listed, followed by a `MORE_OF_THE_SAME`
+  note giving the true total. If that note is present, report the total and not
+  the number of lines you can see.
 - The `instruction-auditor` agent reads the same `section-criteria.md` tests and
   runs the same judgment pass autonomously, returning a structured report. Use
   this skill when the user asked for an audit and wants the conversation; use the

@@ -132,11 +132,79 @@ Instructions that ask Copilot to "Follow external links" are listed among those
 that do not have the intended effect, with the workaround "Copy the relevant
 content directly into your instruction file instead".
 
-**OpenAI Codex** — the merged `AGENTS.md` chain is truncated at
-`project_doc_max_bytes`: "Codex skips empty files and stops adding files once
-the combined size reaches the limit defined by `project_doc_max_bytes` (32 KiB
-by default)." On rule writing: "Keep rules concise, explain the behavior to flag
-and any safe path or exception, and reserve formatting and lint checks for CI."
+**OpenAI Codex** — on rule writing: "Keep rules concise, explain the behavior to
+flag and any safe path or exception, and reserve formatting and lint checks for
+CI."
+
+Loading behaviour, from the documentation:
+
+- Discovery is hierarchical and per directory: "Codex concatenates files from
+  the root down, joining them with blank lines. Files closer to your current
+  directory override earlier guidance because they appear later in the combined
+  prompt."
+- The chain is capped: "Codex skips empty files and stops adding files once the
+  combined size reaches the limit defined by `project_doc_max_bytes` (32 KiB by
+  default)." The documented remedy is "Raise the limit or split instructions
+  across nested directories when you hit the cap."
+- `project_doc_fallback_filenames` configures additional names to try. The
+  documented example is `["TEAM_GUIDE.md", ".agents.md"]`; `CLAUDE.md` is not
+  mentioned.
+- The page says nothing about file imports, `@`-references or HTML comments.
+
+### Codex behaviour established by reading the source, not the documentation
+
+The three facts the checker's Codex model depends on most are not stated on any
+documentation page, two of them because they are negative. They were established
+by reading
+[`codex-rs/core/src/agents_md.rs`](https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs)
+and
+[`codex-rs/config/defaults.toml`](https://github.com/openai/codex/blob/main/codex-rs/config/defaults.toml)
+on 2026-09-16. Cite them as a source reading of that revision, not as vendor
+guidance, and re-check them before relying on them against a much later release.
+
+- **No import is expanded.** `read_agents_md` reads the file as bytes,
+  truncates to the remaining budget, converts with `String::from_utf8_lossy`
+  and pushes the text verbatim into an `InstructionEntry`. There is no markdown
+  parse anywhere on that path, and the repository contains no import-resolution
+  machinery. An `@path` line in a file Codex loads therefore reaches the model
+  as literal text, and the file it names is never read.
+- **No HTML comment is stripped.** Same path, same reason: the bytes on disk
+  are the bytes in the prompt. A block comment costs its own length against
+  `project_doc_max_bytes` and is read by the model as part of the instructions.
+- **Truncation is on a byte boundary and is silent.** `data.truncate(remaining)`
+  cuts mid-line and mid-fence if that is where the budget ends. The only signal
+  is `tracing::warn!("project doc exceeds remaining budget; truncating")`, which
+  does not surface in the TUI; a user issue describes it as "`AGENTS.md` is
+  silently truncated without any warning within the TUI".
+
+Two further values, read from the same revision:
+
+- `candidate_filenames` tries `AGENTS.override.md` first, then `AGENTS.md`, then
+  each configured fallback, and **returns on the first match in a directory**. An
+  `AGENTS.override.md` therefore replaces the `AGENTS.md` beside it rather than
+  adding to it.
+- `defaults.toml` sets `project_doc_max_bytes = 32768`,
+  `project_doc_fallback_filenames = []` and `project_root_markers = [".git"]`.
+  The empty fallback list is why Codex does not read `CLAUDE.md` in a default
+  installation, which is what makes the stub safe to keep host-specific.
+
+`.codex/config.toml` is the **Project** layer of Codex's config stack, above the
+user's `config.toml` and below session flags and managed config, and it is part
+of the effective config like any other layer. One documented exception matters
+here: "Project-root discovery and project trust use the applicable non-project
+layers." So a repository can raise its own `project_doc_max_bytes` and add its
+own `project_doc_fallback_filenames`, and cannot change `project_root_markers`.
+The checker reads the first two from `.codex/config.toml` and not the third for
+exactly that reason. Source:
+[`codex-rs/config/src/loader/README.md`](https://github.com/openai/codex/blob/main/codex-rs/config/src/loader/README.md).
+
+A limit raised in a user's own `~/.codex/config.toml` is invisible to the
+repository and is not modelled: the checker measures what a teammate with a
+default installation would get.
+
+Together these make the two runtimes exact opposites below the repository root:
+Codex loads a nested `AGENTS.md` and never a `CLAUDE.md`; Claude Code loads a
+nested `CLAUDE.md` and never an `AGENTS.md`.
 
 **Cursor** — "Keep rules under 500 lines"; "Copying entire style guides: Use a
 linter instead. Agent already knows common style conventions."; "Agent knows
@@ -301,7 +369,9 @@ First-party documentation:
 - [AGENTS.md specification](https://agents.md/)
 - [GitHub — Add repository custom instructions](https://docs.github.com/en/copilot/how-tos/configure-custom-instructions/add-repository-instructions)
 - [GitHub — Use custom instructions](https://docs.github.com/en/copilot/tutorials/use-custom-instructions)
-- [OpenAI Codex — AGENTS.md](https://developers.openai.com/codex/guides/agents-md)
+- [OpenAI Codex — Custom instructions with AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md) — `developers.openai.com/codex/guides/agents-md` now redirects here
+- [OpenAI Codex — `agents_md.rs`](https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs) and [`defaults.toml`](https://github.com/openai/codex/blob/main/codex-rs/config/defaults.toml) — read at revision `main`, 2026-09-16
+- [openai/codex#7138](https://github.com/openai/codex/issues/7138) — the silent-truncation report, cited as empirical evidence and not as documentation
 - [Cursor — Rules](https://cursor.com/docs/rules)
 - [VS Code — Custom instructions](https://code.visualstudio.com/docs/copilot/customization/custom-instructions)
 - [Spec Kit — agent-context extension](https://github.com/github/spec-kit/tree/main/extensions/agent-context)

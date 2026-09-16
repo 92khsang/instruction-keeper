@@ -272,10 +272,11 @@ monorepo, and anything outside the repository.
   beside it.
 ```
 
-That second line points at the package files for a reader and for an agent that
-reads `AGENTS.md`. It is not what delivers them to Claude Code, which never
-reads an `AGENTS.md`: the `CLAUDE.md` beside each one does that, and Claude Code
-includes it when it reads files in that package.
+That second line points at the package files for a reader. It is not what
+delivers them to either runtime. Codex loads a package's `AGENTS.md` itself when
+the session is working in that directory; Claude Code never reads an `AGENTS.md`
+at any level, and reaches the package's rules only through the `CLAUDE.md` beside
+each one. The line documents where they are, not how they arrive.
 
 **Bad**
 

@@ -19,11 +19,14 @@ CLAUDE.md standard and ships the checker, skills, agent and hook that apply it.
 - Every claim about how an agent runtime behaves carries a citation in
   `evidence.md` or is generalized until it needs none. Do not invent a source,
   a figure, or a vendor's behaviour.
-- Supported scope is Claude Code on Linux and macOS, because that is what CI
-  runs. Widen it in the README only after a run on the new platform, not after
-  reading the code.
-- Claude Code reads `CLAUDE.md`, never `AGENTS.md`, at any level. A nested
-  `AGENTS.md` is not loaded on demand; a nested `CLAUDE.md` beside it is.
+- Where the plugin runs and what the checker models are different scopes. The
+  plugin is tested on Claude Code on Linux and macOS, because that is what CI
+  runs; the checker models Claude Code and Codex. Widen either in the README
+  only after a run, not after reading the code.
+- Claude Code reads `CLAUDE.md`, never `AGENTS.md`, at any level. Codex reads
+  `AGENTS.md` as raw bytes from the project root down to the cwd, expands no
+  import, strips no comment, and truncates silently at 32 KiB. Below the root
+  the two are exact opposites, which is why a package needs both files.
 - The budget numbers are restated in prose across the skills, the agent and
   the README. Run `grep -rn '\b120\b\|\b200\b\|\b400\b' --include='*.md' .`
   before changing one: the checker is the authority and the prose has to follow
@@ -78,5 +81,5 @@ repository on every push and pull request.
 - [evidence.md](skills/instruction-standard/references/evidence.md) — the source behind
   every number, and the list of claims nothing supports; read it before adding or
   defending a factual claim.
-- [AGENTS.md.template](assets/AGENTS.md.template) — a conforming skeleton with
-  each section's admission test as a stripped HTML comment.
+- [AGENTS.md.template](assets/AGENTS.md.template) — a conforming skeleton. It
+  carries no comments: Codex does not strip them and would read them as rules.

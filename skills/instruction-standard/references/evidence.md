@@ -151,42 +151,56 @@ Loading behaviour, from the documentation:
   mentioned.
 - The page says nothing about file imports, `@`-references or HTML comments.
 
-### Codex behaviour established by reading the source, not the documentation
+### Codex behaviour observed directly
 
-The three facts the checker's Codex model depends on most are not stated on any
-documentation page, two of them because they are negative. They were established
-by reading
+The facts the checker's Codex model depends on most are not stated on any
+documentation page, several of them because they are negative. They were first
+established by reading
 [`codex-rs/core/src/agents_md.rs`](https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs)
 and
-[`codex-rs/config/defaults.toml`](https://github.com/openai/codex/blob/main/codex-rs/config/defaults.toml)
-on 2026-09-16. Cite them as a source reading of that revision, not as vendor
-guidance, and re-check them before relying on them against a much later release.
+[`codex-rs/config/defaults.toml`](https://github.com/openai/codex/blob/main/codex-rs/config/defaults.toml),
+and then **confirmed by observation against Codex CLI 0.154.0 on 2026-09-16**,
+using `codex debug prompt-input` to render the model-visible prompt without
+making a model call. Each bullet below states the code and what was observed;
+the source reading is the explanation, the observation is the evidence.
+
+The method is reproducible in a scratch repository and costs nothing: write the
+file, run `codex debug prompt-input`, and read the `<INSTRUCTIONS>` block. Use
+an isolated `CODEX_HOME` so an experiment cannot disturb a real configuration.
 
 - **No import is expanded.** `read_agents_md` reads the file as bytes,
   truncates to the remaining budget, converts with `String::from_utf8_lossy`
   and pushes the text verbatim into an `InstructionEntry`. There is no markdown
   parse anywhere on that path, and the repository contains no import-resolution
-  machinery. An `@path` line in a file Codex loads therefore reaches the model
-  as literal text, and the file it names is never read.
+  machinery. *Observed:* an `AGENTS.md` containing `@imported-rules.md` put that
+  line in the prompt as literal text, and no line of `imported-rules.md`
+  appeared anywhere in it.
 - **No HTML comment is stripped.** Same path, same reason: the bytes on disk
-  are the bytes in the prompt. A block comment costs its own length against
-  `project_doc_max_bytes` and is read by the model as part of the instructions.
+  are the bytes in the prompt. *Observed:* a block comment written into
+  `AGENTS.md` appeared in the `<INSTRUCTIONS>` block verbatim, delimiters and
+  all. It costs its own length against `project_doc_max_bytes` and the model
+  reads it as part of the instructions.
 - **Truncation is on a byte boundary and is silent.** `data.truncate(remaining)`
-  cuts mid-line and mid-fence if that is where the budget ends. The only signal
-  is `tracing::warn!("project doc exceeds remaining budget; truncating")`, which
-  does not surface in the TUI; a user issue describes it as "`AGENTS.md` is
-  silently truncated without any warning within the TUI".
-
-Two further values, read from the same revision:
-
-- `candidate_filenames` tries `AGENTS.override.md` first, then `AGENTS.md`, then
-  each configured fallback, and **returns on the first match in a directory**. An
-  `AGENTS.override.md` therefore replaces the `AGENTS.md` beside it rather than
-  adding to it.
-- `defaults.toml` sets `project_doc_max_bytes = 32768`,
-  `project_doc_fallback_filenames = []` and `project_root_markers = [".git"]`.
-  The empty fallback list is why Codex does not read `CLAUDE.md` in a default
-  installation, which is what makes the stub safe to keep host-specific.
+  cuts mid-line and mid-fence if that is where the budget ends. *Observed:* a
+  39,522-byte `AGENTS.md` produced 32,784 bytes of instructions in the prompt —
+  the 32,768-byte cap plus the wrapper — with the file's last line absent and no
+  warning of any kind in the rendered prompt. A user issue describes the same
+  thing in the TUI: "`AGENTS.md` is silently truncated without any warning".
+- **One file per directory, first name wins.** `candidate_filenames` tries
+  `AGENTS.override.md`, then `AGENTS.md`, then each configured fallback, and
+  returns on the first match. *Observed:* with both files present at the root,
+  the override's content was in the prompt and **no line of `AGENTS.md` was** —
+  it replaces the file beside it rather than adding to it.
+- **`CLAUDE.md` is not read.** `defaults.toml` sets
+  `project_doc_fallback_filenames = []`. *Observed:* a `CLAUDE.md` at the root
+  of the same repository contributed nothing to the prompt. This is what makes
+  the stub safe to keep host-specific.
+- **The chain is root-to-cwd.** *Observed:* with the working directory at the
+  repository root, only the root `AGENTS.md` was loaded; with it at
+  `packages/api`, the prompt held the root file and `packages/api/AGENTS.md`
+  concatenated in that order.
+- `defaults.toml` also sets `project_doc_max_bytes = 32768` and
+  `project_root_markers = [".git"]`.
 
 `.codex/config.toml` is the **Project** layer of Codex's config stack, above the
 user's `config.toml` and below session flags and managed config, and it is part
@@ -201,6 +215,57 @@ exactly that reason. Source:
 A limit raised in a user's own `~/.codex/config.toml` is invisible to the
 repository and is not modelled: the checker measures what a teammate with a
 default installation would get.
+
+### Codex's plugin and hook surfaces
+
+Relevant because this plugin ships into both runtimes from one directory. Read
+from the same revision, and from
+[learn.chatgpt.com/docs/hooks](https://learn.chatgpt.com/docs/hooks) and
+[/docs/plugins](https://learn.chatgpt.com/docs/plugins).
+
+- `DISCOVERABLE_PLUGIN_MANIFEST_PATHS` is `[".codex-plugin/plugin.json",
+  ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json"]`, tried after a
+  root `plugin.json` carrying an Agent Plugins schema. Codex therefore reads a
+  Claude Code plugin manifest as-is.
+- `HookToolName::apply_patch()` carries the matcher aliases `Write` and `Edit`,
+  commented "for compatibility with hook configurations that describe edits
+  using Claude Code-style names". The serialized `tool_name` stays
+  `apply_patch`.
+- The hook environment includes `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA`
+  beside `PLUGIN_ROOT` and `PLUGIN_DATA`, commented "For OOTB compat with
+  existing plugins that use this env var". There is no `CLAUDE_PROJECT_DIR`.
+- `HookHandlerConfig::Command` has `command`, `commandWindows`, `timeout`,
+  `async`, `statusMessage` and `additionalContextLimit`. **No `args`**, so an
+  exec-form hook config deserializes with the script dropped.
+- `tool_input.command` for `apply_patch` is the raw patch text:
+  `apply_patch_payload_command` returns the `ToolPayload::Custom` input
+  verbatim. The file markers are `*** Add File:`, `*** Update File:`,
+  `*** Delete File:` and `*** Move to:`.
+- `resolve_manifest_hooks` returns `None` when the manifest omits `hooks`, so a
+  plugin must declare the path. `plugin_skill_roots` does fall back to
+  `<plugin_root>/skills`, so skills are discovered.
+- Model-visible hook output defaults to roughly 2,500 tokens before spilling to
+  disk, against Claude Code's 10,000-character cap.
+- Codex subagents are TOML files under `.codex/agents/` requiring `name`,
+  `description` and `developer_instructions`. The plugin manifest has no
+  `agents` field and nothing documents a plugin shipping one.
+- **No placeholder is substituted inside a `SKILL.md` body.** *Observed:*
+  Codex's own prompt says each skill entry carries "a short path that can be
+  expanded into an absolute path using the skill roots table", and in a real
+  session the model read the file itself with `cat <root>/instruction-standard/SKILL.md`.
+  The body is never expanded by the host, so `${CLAUDE_PLUGIN_ROOT}` reaches the
+  model as text. The skill roots table does give the model the plugin's absolute
+  `skills/` path, which is what makes a "two directories up" fallback workable.
+- **A hook that is neither managed nor built in does not run until it is
+  trusted.** `hook_trust_status` returns `Untrusted` when no `trusted_hash` is
+  recorded for the hook's key, and the review flow that records one lives in
+  `codex-rs/tui/src/startup_hooks_review.rs` — the interactive TUI only.
+  *Observed:* in a `codex exec` session that made a matching tool call, neither
+  a plugin hook nor a plain user-level hook in `$CODEX_HOME/hooks.json` ran.
+  **Not established:** whether the hook runs in the TUI once trusted. The trust
+  hash is a sha256 over Codex's own canonical TOML of a normalized hook
+  identity, which was not reproduced by hand, and the TUI review could not be
+  driven non-interactively.
 
 Together these make the two runtimes exact opposites below the repository root:
 Codex loads a nested `AGENTS.md` and never a `CLAUDE.md`; Claude Code loads a

@@ -27,6 +27,13 @@ Invoke the `instruction-standard` skill if it is not already loaded, and read
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py" --project-root "${CLAUDE_PROJECT_DIR}"
 ```
 
+`${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code and not by every host. If
+the literal text reaches the shell or the path expands to nothing, derive it
+instead: this file is at `<plugin root>/skills/<name>/SKILL.md`, so the plugin
+root is two directories above the one holding this file, and the checker is at
+`<plugin root>/scripts/check_instructions.py`. Substitute `${CLAUDE_PROJECT_DIR}`
+the same way — it is the repository root of the working directory.
+
 Run it with no path argument, even when the user named one file: that is the
 only invocation that reports the whole pair. Add `--json` when the output needs
 to be processed rather than read.

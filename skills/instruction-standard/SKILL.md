@@ -231,6 +231,13 @@ extension installed, Spec Kit owns the region between
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py" --project-root "${CLAUDE_PROJECT_DIR}"
 ```
 
+`${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code and not by every host. If
+the literal text reaches the shell or the path expands to nothing, derive it
+instead: this file is at `<plugin root>/skills/<name>/SKILL.md`, so the plugin
+root is two directories above the one holding this file, and the checker is at
+`<plugin root>/scripts/check_instructions.py`. Substitute `${CLAUDE_PROJECT_DIR}`
+the same way — it is the repository root of the working directory.
+
 With no path argument it checks the root `AGENTS.md` and `CLAUDE.md`. Positional
 paths narrow the structural checks to the named files — the pair contract and
 the budget are measured either way — and a relative path resolves against

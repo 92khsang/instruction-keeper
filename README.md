@@ -106,8 +106,9 @@ skill).
 
 Requires `python3` on `PATH` — the checker and the hook are standard library
 only, Python 3.8+. Without it the hook cannot start and the skills lose their
-deterministic half. This release is tested on Claude Code on Linux and macOS;
-see [Scope](#hosts-and-platforms) for what that leaves out.
+deterministic half. This release is tested on Claude Code on Linux and macOS,
+and installs into Codex from the same directory; see
+[Scope](#hosts-and-platforms) for what each of those claims covers.
 
 For one session, without installing:
 
@@ -130,6 +131,72 @@ installing, or run `/reload-plugins`.
 Note that Claude Code ships a builtin `/init`. Typing `/init` gets the builtin,
 which generates a `CLAUDE.md` from a codebase scan; this plugin's command is
 `/instruction-keeper:init` and writes the `AGENTS.md` pair instead.
+
+### Codex
+
+Codex reads `.claude-plugin/plugin.json` directly — it is third in its manifest
+search order, after a root `plugin.json` carrying an Agent Plugins schema and
+`.codex-plugin/plugin.json` — so the same directory installs, through
+`/plugins` in the Codex CLI. There is no second manifest and no second hooks
+file: the hook config is written in the one form both runtimes accept.
+
+Three things made that possible, and none of them is an accident on Codex's
+side. It accepts `Write` and `Edit` as matcher aliases for its own
+`apply_patch`, "for compatibility with hook configurations that describe edits
+using Claude Code-style names". It sets `CLAUDE_PLUGIN_ROOT` alongside its own
+`PLUGIN_ROOT`, "for compatibility with existing plugin hooks". And its
+`PostToolUse` stdin and stdout contracts — `tool_input`, `systemMessage`,
+`hookSpecificOutput.additionalContext` — are the same fields.
+
+Two things differ, and the plugin handles both rather than assuming:
+
+* Codex's command handler has no `args` array, only `command`, so
+  `hooks/hooks.json` writes one quoted string. An exec form would deserialize
+  there with the script dropped and bare `python3` left reading the payload as
+  a program.
+* Codex sets no `CLAUDE_PROJECT_DIR` and states patch paths relative to the
+  working directory, so the hook takes the files from the `apply_patch`
+  envelope and finds the repository root by walking up for `.git`, which is
+  Codex's own default `project_root_markers`.
+
+**What was verified, against Codex CLI 0.154.0.**
+
+* `codex plugin marketplace add` and `codex plugin add` install it —
+  `installed, enabled`, version `0.2.0`, read from
+  `.claude-plugin/plugin.json`.
+* All four skills register, namespaced `instruction-keeper:audit`, `:init`,
+  `:instruction-standard`, `:split`. In a real session the model reached for
+  `instruction-standard` on its own and read the file.
+* The loading behaviour the checker models is what Codex does; see
+  `references/evidence.md` for the observation behind each claim.
+* The hook script itself, run against a Codex-shaped `apply_patch` payload —
+  patch envelope parsed, relative paths resolved against a package working
+  directory, root recovered from `.git`, findings emitted on
+  `additionalContext` — including from a plugin directory whose path contains a
+  space.
+
+**The hook does not run under `codex exec`, and that is not specific to this
+plugin.** In a session that made a matching tool call, neither this plugin's
+hook nor a plain user-level hook in `$CODEX_HOME/hooks.json` executed. Codex
+treats a hook that is neither managed nor built in as `Untrusted` until a
+`trusted_hash` is recorded for it, and the flow that records one,
+`startup_hooks_review`, exists only in the interactive TUI. Whether the hook
+runs in the TUI once trusted has not been tested — driving that review
+non-interactively was not possible here. Assume the checker, not the hook, is
+what a Codex user gets until you have trusted it in the TUI yourself.
+
+**Codex hands the model a path to `SKILL.md` rather than an expanded body**, so
+nothing substitutes `${CLAUDE_PLUGIN_ROOT}` inside one. Each skill says what to
+do instead: this file sits at `<plugin root>/skills/<name>/SKILL.md`, so the
+plugin root is two directories up and the checker is at
+`<plugin root>/scripts/check_instructions.py`. The skill roots table in Codex's
+own prompt gives the model the absolute path it needs to do that.
+
+`agents/instruction-auditor.md` does not carry over. A Codex subagent is a TOML
+file under `.codex/agents/` with `name`, `description` and
+`developer_instructions`, Codex's plugin manifest has no `agents` field, and
+nothing documents a plugin shipping one. The checker, the hook and the four
+skills are what a Codex install gets.
 
 ## Using the checker directly
 
@@ -269,9 +336,13 @@ incident behind it. **Silence from the checker is not approval.**
 Two things have different scopes here, and conflating them would be the kind of
 unverified assertion this plugin exists to catch.
 
-**Where the plugin runs: Claude Code on Linux and macOS.** That is what is
-tested — CI runs both suites on Python 3.8 and on the current release, on
-`ubuntu-latest` — and the hook, skills and agent are Claude Code components.
+**Where the plugin runs: Claude Code on Linux and macOS, and Codex on the
+same, minus the hook.** Claude Code is what CI exercises — both suites on
+Python 3.8 and on the current release, on `ubuntu-latest`. Codex 0.154.0
+installs it and loads all four skills, verified by running it; its hook did not
+execute under `codex exec`, because Codex holds an untrusted hook until it is
+approved in the interactive TUI. See [Installation](#codex) for what was
+observed. `agents/instruction-auditor.md` is Claude Code only.
 
 **What the checker models: Claude Code and Codex.** Both loading rules are
 implemented and both are reported on every run. The Codex rules come from

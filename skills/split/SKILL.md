@@ -26,6 +26,13 @@ Invoke the `instruction-standard` skill, then:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py" --project-root "${CLAUDE_PROJECT_DIR}"
 ```
 
+`${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code and not by every host. If
+the literal text reaches the shell or the path expands to nothing, derive it
+instead: this file is at `<plugin root>/skills/<name>/SKILL.md`, so the plugin
+root is two directories above the one holding this file, and the checker is at
+`<plugin root>/scripts/check_instructions.py`. Substitute `${CLAUDE_PROJECT_DIR}`
+the same way — it is the repository root of the working directory.
+
 Whenever either file of the pair exists, the first line of the output is the
 budget, on a clean run too:
 

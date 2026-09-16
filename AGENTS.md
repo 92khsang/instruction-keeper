@@ -12,9 +12,11 @@ CLAUDE.md standard and ships the checker, skills, agent and hook that apply it.
 - The hook never blocks and never raises. It exits 0 on every path, reports
   through `hookSpecificOutput.additionalContext`, and keeps `systemMessage` to
   one line because that field reaches the user and not the model.
-- One hooks file serves both runtimes. Codex has no `args` array, so the
-  command stays a single quoted string, and `hooks` must stay declared in the
-  manifest because Codex has no default path for it.
+- One hooks file serves both runtimes, and its path is load-bearing. Codex
+  reads no hook unless the manifest names a file; Claude Code auto-loads
+  `hooks/hooks.json` and rejects a manifest that names it too. So the file
+  stays declared and stays off that path. Codex has no `args` array either, so
+  the command stays a single quoted string.
 - A check belongs in the checker only when it is deterministic and
   high-precision. Judgment — whether a linter already enforces a rule, whether
   a line is inferable from the code — belongs to the audit skill and the

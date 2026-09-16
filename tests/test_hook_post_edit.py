@@ -464,12 +464,16 @@ class TestDiffScoping(HookCase):
 
 
 class TestHookRegistration(unittest.TestCase):
-    """The hook is only reached if hooks.json points at it correctly."""
+    """The hook is only reached if the hooks file points at it correctly."""
 
     def setUp(self) -> None:
-        self.config = json.loads(
-            (PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        self.manifest = json.loads(
+            (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
+        declared = self.manifest["hooks"]
+        assert declared.startswith("./"), declared
+        self.hooks_path = PLUGIN_ROOT / declared[2:]
+        self.config = json.loads(self.hooks_path.read_text(encoding="utf-8"))
 
     def test_matcher_covers_the_file_writing_tools(self):
         entries = self.config["hooks"]["PostToolUse"]
@@ -504,15 +508,28 @@ class TestHookRegistration(unittest.TestCase):
         hook = self.config["hooks"]["PostToolUse"][0]["hooks"][0]
         self.assertIn("additionalContextLimit", hook)
 
-    def test_the_manifest_declares_the_hooks_file(self):
-        # Codex has no default hooks path: resolve_manifest_hooks returns None
-        # when the manifest omits the field, so a plugin that relies on Claude
-        # Code's discovery ships no hook at all to Codex.
-        manifest = json.loads(
-            (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    def test_the_hooks_file_is_declared_and_is_not_at_the_auto_loaded_path(self):
+        """The one layout both runtimes accept.
+
+        The two requirements pull in opposite directions. Codex loads no hook
+        unless the manifest names a file: `resolve_manifest_hooks` returns None
+        when the field is absent. Claude Code loads `hooks/hooks.json` by
+        itself and treats `manifest.hooks` as *additional* files, so naming
+        that path there fails the whole plugin with "Duplicate hooks file
+        detected" and every hook is lost.
+
+        A declared file at any other path satisfies both: Claude Code loads it
+        because the manifest names it, Codex loads it for the same reason, and
+        neither loads it twice.
+        """
+        self.assertTrue(self.hooks_path.is_file(), self.hooks_path)
+        self.assertFalse(
+            (PLUGIN_ROOT / "hooks" / "hooks.json").exists(),
+            "hooks/hooks.json is Claude Code's auto-loaded path; a declared "
+            "manifest entry pointing at it is a duplicate load and disables "
+            "the plugin",
         )
-        self.assertEqual(manifest["hooks"], "./hooks/hooks.json")
-        self.assertTrue((PLUGIN_ROOT / "hooks" / "hooks.json").is_file())
+        self.assertNotEqual(self.manifest["hooks"], "./hooks/hooks.json")
 
     def test_the_two_manifests_state_the_same_version(self):
         plugin = json.loads(

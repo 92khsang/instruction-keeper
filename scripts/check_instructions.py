@@ -19,11 +19,21 @@ most common defect and nothing subtler. Silence from this script is not
 approval; see references/section-criteria.md for the tests a human or an agent
 must apply.
 
+Two hosts are checked on every run, because AGENTS.md exists to be read by more
+than one runtime and they do not read it the same way. Claude Code reads
+CLAUDE.md, expands its @-imports and strips block-level HTML comments; Codex
+reads AGENTS.md itself as raw bytes, expands nothing and strips nothing. The
+Host table below records those differences once; see references/evidence.md for
+the citation behind each field.
+
 Measurement units, stated once because they differ by design:
 
-* The size budget counts every line of the resolved closure, blank lines
+* The Claude Code budget counts every line of the resolved closure, blank lines
   included, because that is what occupies context. Block-level HTML comments are
   excluded: Claude Code strips them before injection.
+* The Codex budget counts raw bytes on disk over the chain of files from the
+  repository root down to a working directory, comments and unexpanded import
+  lines included, because that is what Codex concatenates.
 * Per-section caps and the CLAUDE.md stub cap count non-blank lines only.
 
 Exit codes: 0 = no failures (warnings and info allowed), 1 = at least one
@@ -77,6 +87,65 @@ REQUIRED_SECTIONS = ["Rules", "Commands"]
 # Claude Code loads a project CLAUDE.md from either location.
 # https://code.claude.com/docs/en/memory
 CLAUDE_MD_LOCATIONS = ["CLAUDE.md", ".claude/CLAUDE.md"]
+
+
+@dataclass(frozen=True)
+class Host:
+    """An agent runtime's instruction-file loading model.
+
+    Every host behaviour the checker depends on is a field here rather than a
+    branch inside a check, so that a claim about a runtime is one value with one
+    citation. Each field is sourced in references/evidence.md.
+
+    Attributes:
+        key: Stable identifier used in ``--json`` output.
+        label: Name used in finding messages.
+        expands_imports: Whether an ``@path`` line loads the file it names.
+        strips_comments: Whether block-level HTML comments are removed before
+            the file reaches the model.
+    """
+    key: str
+    label: str
+    expands_imports: bool
+    strips_comments: bool
+
+
+CLAUDE_CODE = Host("claude-code", "Claude Code", expands_imports=True, strips_comments=True)
+CODEX = Host("codex", "Codex", expands_imports=False, strips_comments=False)
+HOSTS = (CLAUDE_CODE, CODEX)
+
+# Codex reads one file per directory along the chain from the project root to
+# the working directory, taking the first of these names that exists. Both are
+# read as raw bytes: no import is expanded and no comment is removed.
+# https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs
+CODEX_FILENAMES = ("AGENTS.override.md", "AGENTS.md")
+
+# project_doc_max_bytes, from codex-rs/config/defaults.toml. Codex concatenates
+# the chain root-first and truncates on a byte boundary once this is reached.
+# The truncation is silent: it is a tracing warning, not a message in the TUI.
+CODEX_DEFAULT_MAX_BYTES = 32768
+CODEX_WARN_RATIO = 0.75
+
+# Comments are free in Claude Code and billed in Codex, so a comment-heavy file
+# is reported once it is large enough for the difference to matter.
+CODEX_COMMENT_WARN_RATIO = 0.25
+CODEX_COMMENT_WARN_BYTES = 2048
+
+# Directories the nested scan never descends into. A repository is walked to
+# find instruction files, not indexed, so vendored trees are skipped outright
+# and the total is capped to keep the walk bounded on a large checkout.
+CODEX_SCAN_SKIP_DIRS = frozenset({
+    "node_modules", "vendor", "target", "dist", "build", "__pycache__",
+    ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".git",
+})
+CODEX_SCAN_KEEP_DOT_DIRS = frozenset({".claude", ".codex"})
+CODEX_SCAN_DIR_LIMIT = 20000
+
+# A defect that repeats once per package is one defect with one fix. Past this
+# many instances of a code the rest are collapsed into a single finding that
+# states the true count, because a wall of identical warnings is the fastest way
+# to teach a reader to skip the whole report. The cap is never silent.
+REPEATED_FINDING_CAP = 10
 
 # Heading synonyms -> canonical section. Matched on a normalized heading:
 # lowercased, punctuation stripped, whitespace collapsed.
@@ -293,6 +362,7 @@ class Finding:
     section: Optional[str] = None
     line: Optional[int] = None
     fix: Optional[str] = None
+    host: Optional[str] = None   # Host.key, or None when the finding is host-neutral
 
     def key(self) -> str:
         """Identity used to decide whether a finding is new.
@@ -304,6 +374,10 @@ class Finding:
         section. Severity is encoded in ``code``, so crossing a threshold still
         reads as new.
         """
+        # ``host`` is deliberately absent: every host-specific code already
+        # carries the host in its name, so adding the field would change every
+        # stored key and invalidate every --new-only baseline for nothing.
+        #
         # Numbers are normalized out: a size or cap finding restates its own
         # count, and keying on that would make the finding read as new on every
         # edit that changed the count by one.
@@ -624,6 +698,242 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except (ValueError, OSError, RuntimeError):
         return False
+
+
+# --------------------------------------------------------------------------
+# The Codex load
+#
+# Claude Code and Codex read different files under different rules, so they are
+# measured by different functions on purpose. measure_closure above follows one
+# CLAUDE.md through its @-imports and counts lines with comments removed;
+# measure_codex_chain below walks a directory chain and counts raw bytes with
+# nothing removed. Folding them together would hide the fact that the two
+# runtimes disagree, which is the whole thing this release exists to report.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class CodexConfig:
+    """The parts of a repository's .codex/config.toml the checker needs.
+
+    Defaults match codex-rs/config/defaults.toml. A repository that raises
+    ``project_doc_max_bytes`` must not be told its files are too large, so the
+    file is read when it exists; anything that cannot be parsed confidently
+    leaves the corresponding default in place.
+    """
+    max_bytes: int = CODEX_DEFAULT_MAX_BYTES
+    fallback_filenames: Tuple[str, ...] = ()
+    source: Optional[str] = None   # repo-relative path the values came from
+
+    @property
+    def filenames(self) -> Tuple[str, ...]:
+        """Candidate names Codex tries in one directory, in order."""
+        names = list(CODEX_FILENAMES)
+        for name in self.fallback_filenames:
+            if name not in names:
+                names.append(name)
+        return tuple(names)
+
+
+# Deliberately not a TOML parser. Three keys are read from the top level of the
+# file by shape; a table header ends the region this can speak about, because a
+# key of the same name under [profiles.x] is not the active value.
+_TOML_INT_RE = re.compile(r"^\s*project_doc_max_bytes\s*=\s*(\d[\d_]*)\s*(?:#.*)?$")
+_TOML_LIST_RE = re.compile(
+    r"^\s*project_doc_fallback_filenames\s*=\s*\[(.*?)\]\s*(?:#.*)?$")
+_TOML_TABLE_RE = re.compile(r"^\s*\[")
+_TOML_STRING_RE = re.compile(r"[\"\']([^\"\']*)[\"\']")
+
+
+def read_codex_config(project_root: Path) -> CodexConfig:
+    """Read .codex/config.toml, falling back to Codex's own defaults.
+
+    Only top-level scalar and single-line array forms are recognised. A value
+    this cannot read is left at its default rather than guessed at, because a
+    wrong budget produces a wrong finding and this checker's contract is
+    precision over recall.
+    """
+    path = project_root / ".codex" / "config.toml"
+    try:
+        if not path.is_file():
+            return CodexConfig()
+        text = read_text(path)
+    except (OSError, RuntimeError):
+        return CodexConfig()
+
+    config = CodexConfig(source=rel(project_root, path))
+    for line in text.splitlines():
+        if _TOML_TABLE_RE.match(line):
+            break
+        m = _TOML_INT_RE.match(line)
+        if m:
+            try:
+                config.max_bytes = int(m.group(1).replace("_", ""))
+            except ValueError:
+                pass
+            continue
+        m = _TOML_LIST_RE.match(line)
+        if m:
+            config.fallback_filenames = tuple(
+                n for n in _TOML_STRING_RE.findall(m.group(1)) if n
+            )
+    return config
+
+
+@dataclass
+class CodexFile:
+    """One file Codex loads, measured as Codex sees it."""
+    path: Path
+    raw_bytes: int = 0
+    comment_bytes: int = 0        # block-level HTML comments, billed here
+    imports: List[Tuple[int, str]] = field(default_factory=list)   # (line, target)
+    shadowed: Optional[Path] = None   # AGENTS.md this file hides in its directory
+
+
+@dataclass
+class CodexChain:
+    """Everything Codex concatenates for one working directory.
+
+    ``leaf`` is the directory a session would have to be in for this chain to
+    load. The root chain always exists when the repository has a root
+    AGENTS.md; a package chain exists for every directory below it that has one
+    of its own.
+    """
+    leaf: Path
+    files: List[CodexFile] = field(default_factory=list)
+
+    @property
+    def raw_bytes(self) -> int:
+        return sum(f.raw_bytes for f in self.files)
+
+
+def _measure_codex_file(path: Path) -> Optional[CodexFile]:
+    """Measure one file the way Codex loads it: raw bytes, nothing removed."""
+    try:
+        raw = path.read_bytes()
+        text = read_text(path)
+    except (OSError, RuntimeError):
+        return None
+
+    measured = CodexFile(path=path, raw_bytes=len(raw))
+
+    effective, _ = strip_block_html_comments(text)
+    measured.comment_bytes = max(
+        0, len(text.encode("utf-8")) - len(effective.encode("utf-8")))
+
+    # Reported per line so the finding can point at the import that will not
+    # load. find_imports collapses position, so the scan is repeated here on the
+    # same scrubbed view it uses.
+    scrubbed = strip_code_spans(strip_fences(blank_block_html_comments(text)))
+    for number, line in enumerate(scrubbed.splitlines(), 1):
+        for m in re.finditer(r"(?:^|\s)@([^\s`]+)", line):
+            target = m.group(1).rstrip(".,;:)")
+            if target and not target.startswith("@"):
+                measured.imports.append((number, target))
+    return measured
+
+
+def _codex_file_in(directory: Path, config: CodexConfig) -> Optional[CodexFile]:
+    """The one file Codex loads from this directory, if any.
+
+    Codex takes the first name that exists and never looks at the rest, so a
+    stray AGENTS.override.md silently replaces AGENTS.md. That is recorded on
+    the returned file rather than discovered again later.
+    """
+    names = config.filenames
+    for index, name in enumerate(names):
+        candidate = directory / name
+        try:
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        measured = _measure_codex_file(candidate)
+        if measured is None:
+            continue
+        for later in names[index + 1:]:
+            hidden = directory / later
+            try:
+                if hidden.is_file():
+                    measured.shadowed = hidden
+                    break
+            except OSError:
+                continue
+        return measured
+    return None
+
+
+def codex_directories(
+    project_root: Path,
+    config: Optional[CodexConfig] = None,
+) -> Tuple[List[Path], bool]:
+    """Directories holding an instruction file either host would load.
+
+    Returns the directories and whether the walk stopped early. Both hosts'
+    filenames are collected in one pass so the nested-pair check can see a
+    CLAUDE.md that has no AGENTS.md beside it, and a name the repository added
+    to ``project_doc_fallback_filenames`` counts as one Codex would load.
+    """
+    config = config or CodexConfig()
+    watched = set(config.filenames) | {"CLAUDE.md"}
+    found: List[Path] = []
+    visited = 0
+    truncated = False
+
+    for current, dirnames, filenames in os.walk(project_root):
+        visited += 1
+        if visited > CODEX_SCAN_DIR_LIMIT:
+            truncated = True
+            dirnames[:] = []
+            break
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in CODEX_SCAN_SKIP_DIRS
+            and (not d.startswith(".") or d in CODEX_SCAN_KEEP_DOT_DIRS)
+        )
+        if watched.intersection(filenames):
+            found.append(Path(current))
+    return found, truncated
+
+
+def codex_chains(
+    project_root: Path,
+    config: CodexConfig,
+    directories: Sequence[Path],
+) -> List[CodexChain]:
+    """One chain per directory a session could sit in and load something new.
+
+    Codex concatenates every file from the project root down to the working
+    directory, so the amount loaded depends on where the session is. Each
+    directory that contributes a file of its own is therefore a distinct
+    scenario, and each is measured from the root down.
+    """
+    measured: Dict[Path, Optional[CodexFile]] = {}
+
+    def file_in(directory: Path) -> Optional[CodexFile]:
+        if directory not in measured:
+            measured[directory] = _codex_file_in(directory, config)
+        return measured[directory]
+
+    chains: List[CodexChain] = []
+    for leaf in directories:
+        if file_in(leaf) is None:
+            continue
+        chain = CodexChain(leaf=leaf)
+        try:
+            parts = leaf.relative_to(project_root).parts
+        except ValueError:
+            continue
+        cursor = project_root
+        for step in (None,) + parts:
+            if step is not None:
+                cursor = cursor / step
+            found = file_in(cursor)
+            if found is not None:
+                chain.files.append(found)
+        if chain.files:
+            chains.append(chain)
+    return chains
 
 
 def normalize_heading(text: str) -> str:
@@ -1054,10 +1364,11 @@ def check_file_pair(root: Path, report: Report) -> Tuple[Optional[Path], Optiona
 
 
 def report_size(root: Path, closure: Closure, report: Report) -> None:
-    """Compare one measured closure against the length budget.
+    """Compare one measured closure against Claude Code's length budget.
 
-    Every threshold comparison in this checker lives here. ``Closure`` carries
-    more measurements than this function reads; that is deliberate.
+    This function and ``report_codex`` below are the only two places in the
+    checker where a measurement meets a threshold. ``Closure`` carries more
+    measurements than this function reads; that is deliberate.
     """
     if not closure.files:
         return
@@ -1119,6 +1430,284 @@ def report_size(root: Path, closure: Closure, report: Report) -> None:
                 "memory file the first time it sees them, and loads nothing from "
                 "them if the user declines. Teammates will not have this file.",
         )
+
+
+def report_codex(
+    root: Path,
+    chains: Sequence[CodexChain],
+    config: CodexConfig,
+    report: Report,
+    host: Host = CODEX,
+) -> None:
+    """Compare the Codex load against Codex's own limits.
+
+    Codex reads what is on disk: every byte of every file in the chain, comments
+    and unexpanded import lines included. Once the running total reaches
+    ``project_doc_max_bytes`` it truncates on a byte boundary and says nothing,
+    so the size finding here is a hard failure where the Claude Code equivalent
+    at that point is a warning about a file that still loads whole.
+
+    ``host`` decides which of the per-file measurements become findings. An
+    unexpanded import and a billed comment are defects only because this
+    runtime does neither of the two things Claude Code does; a host whose table
+    entry says otherwise is silent about them without any check changing.
+    """
+    if not chains:
+        return
+
+    limit = config.max_bytes
+    warn_at = int(limit * CODEX_WARN_RATIO)
+    budget_note = ""
+    if config.source and limit != CODEX_DEFAULT_MAX_BYTES:
+        budget_note = f" The limit comes from `{config.source}`."
+
+    capped = _Capped(report, root)
+    worst = max(chains, key=lambda c: c.raw_bytes)
+    report.metrics["codex_chain_bytes"] = worst.raw_bytes
+    report.metrics["codex_chain_files"] = [rel(root, f.path) for f in worst.files]
+    report.metrics["codex_max_bytes"] = limit
+
+    # Shallowest first, and a chain is skipped once an ancestor of its leaf has
+    # already been reported: if the root file alone is over the limit then every
+    # chain in the repository is over it for the same reason and has the same
+    # fix. Reporting each one names the wrong file as the cause.
+    reported: List[Path] = []
+    for chain in sorted(chains, key=lambda c: len(c.files)):
+        if any(chain.leaf == d or d in chain.leaf.parents for d in reported):
+            continue
+        name = rel(root, chain.files[-1].path)
+        chain_note = ""
+        if len(chain.files) > 1:
+            chain_note = (
+                f" {host.label} loads this as a chain of {len(chain.files)} files: "
+                + ", ".join(rel(root, f.path) for f in chain.files) + "."
+            )
+        kb = chain.raw_bytes / 1024
+        if chain.raw_bytes >= limit:
+            capped.add(
+                "fail", "CODEX_SIZE_FAIL", name,
+                f"{chain.raw_bytes} bytes / {kb:.1f} KB on disk, at or over the "
+                f"{limit}-byte project_doc_max_bytes.{chain_note} {host.label} "
+                f"truncates on a byte boundary and warns nobody, so the tail of "
+                f"this file is silently absent.{budget_note}",
+                host=host.key,
+                fix="Cut content, or move it below the repository root so it "
+                    "loads only for sessions working in that package. Raising "
+                    "project_doc_max_bytes in .codex/config.toml moves the limit "
+                    "but not the context cost.",
+            )
+            reported.append(chain.leaf)
+        elif chain.raw_bytes >= warn_at:
+            capped.add(
+                "warn", "CODEX_SIZE_WARN", name,
+                f"{chain.raw_bytes} bytes / {kb:.1f} KB on disk, past "
+                f"{int(CODEX_WARN_RATIO * 100)}% of the {limit}-byte "
+                f"project_doc_max_bytes.{chain_note}{budget_note}",
+                host=host.key,
+                fix=f"There is no warning at the limit itself -- {host.label} "
+                    f"simply stops reading. Cut before the chain reaches it.",
+            )
+            reported.append(chain.leaf)
+
+    # Per-file findings are reported once per file, not once per chain that
+    # contains it: a root AGENTS.md appears in every chain in the repository.
+    for measured in _unique_codex_files(chains):
+        name = rel(root, measured.path)
+        for line, target in ([] if host.expands_imports else measured.imports):
+            capped.add(
+                "warn", "CODEX_IMPORT_LITERAL", name,
+                f"`@{target}` is expanded by {CLAUDE_CODE.label} and not by "
+                f"{host.label}, which has no import mechanism. {host.label} "
+                f"passes this line through as literal text and never loads "
+                f"`{target}`.",
+                line=line, host=host.key,
+                fix=f"Move what the target holds into this file, or keep the "
+                    f"import only in CLAUDE.md, which {host.label} does not read.",
+            )
+        if measured.shadowed is not None:
+            capped.add(
+                "warn", "AGENTS_OVERRIDE_SHADOW", name,
+                f"{host.label} reads one file per directory and takes this one "
+                f"first, so `{rel(root, measured.shadowed)}` is never loaded in "
+                f"a {host.label} session.",
+                host=host.key,
+                fix=f"Delete the override, or accept that it replaces the file "
+                    f"beside it rather than adding to it. {CLAUDE_CODE.label} "
+                    f"reads neither, so the two hosts diverge while this exists.",
+            )
+        if not host.strips_comments and measured.comment_bytes >= CODEX_COMMENT_WARN_BYTES and (
+            measured.raw_bytes > 0
+            and measured.comment_bytes / measured.raw_bytes >= CODEX_COMMENT_WARN_RATIO
+        ):
+            share = measured.comment_bytes / measured.raw_bytes
+            capped.add(
+                "warn", "CODEX_COMMENT_COST", name,
+                f"Block-level HTML comments are {measured.comment_bytes} bytes, "
+                f"{share * 100:.0f}% of this file. {CLAUDE_CODE.label} strips "
+                f"them before injection; {host.label} does not, so in a "
+                f"{host.label} session they occupy context and the model reads "
+                f"them as part of the instructions.",
+                host=host.key,
+                fix=f"Move maintainer notes that are not meant for the model out "
+                    f"of the file. A comment is free in {CLAUDE_CODE.label} and "
+                    f"billed everywhere else.",
+            )
+
+    capped.flush()
+
+
+class _Capped:
+    """Emits at most ``REPEATED_FINDING_CAP`` findings per code, then a summary.
+
+    Nested-package findings are unbounded -- a monorepo can have hundreds -- and
+    every one of them has the same fix. The overflow finding names the code and
+    the number withheld so the report never understates what was found.
+    """
+
+    def __init__(self, report: Report, root: Path) -> None:
+        self._report = report
+        self._root = root
+        self._counts: Dict[str, int] = {}
+        self._withheld: Dict[str, int] = {}
+
+    def add(self, severity: str, code: str, *args, **kwargs) -> None:
+        seen = self._counts.get(code, 0)
+        self._counts[code] = seen + 1
+        if seen < REPEATED_FINDING_CAP:
+            self._report.add(severity, code, *args, **kwargs)
+        else:
+            self._withheld[code] = self._withheld.get(code, 0) + 1
+
+    def flush(self) -> None:
+        for code in sorted(self._withheld):
+            held = self._withheld[code]
+            self._report.add(
+                "info", "MORE_OF_THE_SAME", ".",
+                f"{held} further `{code}` findings exist and are not in this "
+                f"report, in text or in --json. {self._counts[code]} were found "
+                f"in total; the first {REPEATED_FINDING_CAP} are listed above "
+                f"and the fix is the same for all of them.",
+                fix="Fix the listed ones and run again for the next batch. The "
+                    "cap keeps one repeated defect from burying every other "
+                    "finding in the report.",
+            )
+
+
+def _unique_codex_files(chains: Sequence[CodexChain]) -> List[CodexFile]:
+    """Every distinct file across the chains, in a stable order."""
+    seen: Set[Path] = set()
+    out: List[CodexFile] = []
+    for chain in chains:
+        for measured in chain.files:
+            if measured.path in seen:
+                continue
+            seen.add(measured.path)
+            out.append(measured)
+    return out
+
+
+def report_nested_pairs(
+    root: Path,
+    directories: Sequence[Path],
+    config: CodexConfig,
+    report: Report,
+) -> None:
+    """Report packages where the two hosts disagree about what loads.
+
+    Below the repository root the hosts are exact opposites: Claude Code loads a
+    nested CLAUDE.md when it reads files in that directory and never reads a
+    nested AGENTS.md, while Codex loads the nested AGENTS.md and never looks at
+    CLAUDE.md. A package therefore needs both files, and the one that is missing
+    is invisible to exactly one host.
+    """
+    # The root pair has its own, fuller check, and .claude is one of the two
+    # places that pair's CLAUDE.md is allowed to live -- it is host
+    # configuration, not a package that needs an AGENTS.md of its own.
+    capped = _Capped(report, root)
+    host_dirs = {root, (root / ".codex")}
+    for location in CLAUDE_MD_LOCATIONS:
+        host_dirs.add((root / location).parent)
+
+    # A repository that lists CLAUDE.md in project_doc_fallback_filenames has
+    # told Codex to read it where no AGENTS.md exists, so the file is not
+    # invisible to Codex and saying it is would be wrong.
+    codex_reads_claude = "CLAUDE.md" in config.filenames
+
+    for directory in directories:
+        if directory in host_dirs:
+            continue
+        rel_dir = rel(root, directory)
+        agents = directory / "AGENTS.md"
+        claude = directory / "CLAUDE.md"
+        try:
+            has_agents = agents.is_file()
+            has_claude = claude.is_file()
+        except OSError:
+            continue
+
+        if has_agents and not has_claude:
+            capped.add(
+                "warn", "NESTED_NO_CLAUDE", rel(root, agents),
+                f"Codex loads this file for sessions working in `{rel_dir}`, but "
+                f"Claude Code never reads an AGENTS.md at any level, so none of "
+                f"it reaches Claude.",
+                host=CLAUDE_CODE.key,
+                fix=f"Add `{rel_dir}/CLAUDE.md` containing `@AGENTS.md`. Claude "
+                    f"Code loads a nested CLAUDE.md on demand when it reads "
+                    f"files in that directory.",
+            )
+        elif has_claude and not has_agents and not codex_reads_claude:
+            capped.add(
+                "warn", "NESTED_NO_AGENTS", rel(root, claude),
+                f"Claude Code loads this file on demand, but Codex reads no "
+                f"CLAUDE.md, so nothing here reaches a Codex session working in "
+                f"`{rel_dir}`.",
+                host=CODEX.key,
+                fix=f"Move the content to `{rel_dir}/AGENTS.md` and leave "
+                    f"`@AGENTS.md` here. Both hosts then load the same text.",
+            )
+        elif has_agents and has_claude:
+            try:
+                wanted = agents.resolve()
+            except (OSError, RuntimeError):
+                continue
+            # A symlink to the sibling AGENTS.md satisfies the stub contract the
+            # same way it does at the repository root: the two files are one
+            # file, so they cannot drift. Reading through it would see the
+            # target's text and report a missing import that is not missing.
+            if claude.is_symlink():
+                try:
+                    if claude.resolve() == wanted:
+                        continue
+                except (OSError, RuntimeError):
+                    pass
+            try:
+                text = read_text(claude)
+            except (OSError, RuntimeError):
+                continue
+            imported = False
+            for target in find_imports(text):
+                candidate = Path(os.path.expanduser(target))
+                if not candidate.is_absolute():
+                    candidate = claude.parent / candidate
+                try:
+                    if candidate.resolve() == wanted:
+                        imported = True
+                        break
+                except (OSError, RuntimeError):
+                    continue
+            if not imported:
+                capped.add(
+                    "warn", "NESTED_NOT_STUB", rel(root, claude),
+                    f"This file does not import `{rel(root, agents)}` beside it, "
+                    f"so the two carry separate text and the hosts read "
+                    f"different instructions for `{rel_dir}`.",
+                    fix="Make the body `@AGENTS.md` plus only what is specific "
+                        "to Claude Code. One file is the source; the other "
+                        "points at it.",
+                )
+
+    capped.flush()
 
 
 def check_structure(root: Path, doc: ParsedDoc, report: Report, project_root: Path) -> None:
@@ -1645,25 +2234,40 @@ def save_state(project_root: Path, keys: Iterable[str]) -> None:
 # --------------------------------------------------------------------------
 
 ICON = {"fail": "FAIL", "warn": "WARN", "info": "INFO"}
+HOST_LABELS = {h.key: h.label for h in HOSTS}
 
 
 def budget_line(report: Report) -> Optional[str]:
-    """One line stating the measured closure against the budget.
+    """One line per host, stating what it loads against its own limit.
 
-    Printed on every run, including a clean one. It is not a finding: a
-    conforming file has none, and the skills still need a number to report.
+    Printed on every run, including a clean one. These are not findings: a
+    conforming file has none, and the skills still need a number to report. The
+    two lines use different units because the runtimes do -- Claude Code loads a
+    resolved closure and Codex loads bytes from disk.
     """
+    out: List[str] = []
     lines = report.metrics.get("resolved_lines")
-    if lines is None:
-        return None
-    kb = float(report.metrics.get("resolved_bytes", 0)) / 1024
-    files = report.metrics.get("closure_files") or []
-    over = ", ".join(str(f) for f in files)
-    return (
-        f"instruction-keeper: {lines} lines / {kb:.1f} KB over {over} "
-        f"(target {AGENTS_TARGET_LINES}, warn {AGENTS_WARN_LINES}, "
-        f"fail {AGENTS_FAIL_LINES})."
-    )
+    if lines is not None:
+        kb = float(report.metrics.get("resolved_bytes", 0)) / 1024
+        files = report.metrics.get("closure_files") or []
+        over = ", ".join(str(f) for f in files)
+        out.append(
+            f"instruction-keeper: {CLAUDE_CODE.label} loads {lines} lines / "
+            f"{kb:.1f} KB over {over} (target {AGENTS_TARGET_LINES}, "
+            f"warn {AGENTS_WARN_LINES}, fail {AGENTS_FAIL_LINES})."
+        )
+
+    codex_bytes = report.metrics.get("codex_chain_bytes")
+    if codex_bytes is not None:
+        limit = int(report.metrics.get("codex_max_bytes", CODEX_DEFAULT_MAX_BYTES))
+        files = report.metrics.get("codex_chain_files") or []
+        over = ", ".join(str(f) for f in files)
+        out.append(
+            f"instruction-keeper: {CODEX.label} loads "
+            f"{float(codex_bytes) / 1024:.1f} KB over {over} "
+            f"(limit {float(limit) / 1024:.0f} KB, truncated silently past it)."
+        )
+    return "\n".join(out) if out else None
 
 
 def render(report: Report, show_info: bool = True) -> str:
@@ -1679,7 +2283,9 @@ def render(report: Report, show_info: bool = True) -> str:
         where = f.file
         if f.line:
             where += f":{f.line}"
-        out.append(f"{ICON[f.severity]}  {where}  [{f.code}]")
+        label = HOST_LABELS.get(f.host or "")
+        suffix = f"  ({label})" if label else ""
+        out.append(f"{ICON[f.severity]}  {where}  [{f.code}]{suffix}")
         out.append(f"      {f.message}")
         if f.fix:
             for i, chunk in enumerate(_wrap(f.fix, 86)):
@@ -1720,17 +2326,30 @@ def run(project_root: Path, targets: Optional[Sequence[Path]] = None) -> Report:
             ``CLAUDE.md`` pair.
     """
     report = Report()
+    report.metrics["hosts"] = [h.key for h in HOSTS]
     agents, claude = check_file_pair(project_root, report)
 
-    # The budget is the union of both closures, because every line either file
-    # imports loads on every request. A stub that is short in itself can still
-    # pull in an arbitrarily large file.
+    # Claude Code's budget is the union of both closures, because every line
+    # either file imports loads on every request. A stub that is short in itself
+    # can still pull in an arbitrarily large file.
     seen: Set[Path] = set()
     closure = Closure()
     for path in (agents, claude):
         if path is not None and path.is_file():
             measure_closure(path, project_root, closure, seen=seen)
     report_size(project_root, closure, report)
+
+    # Codex reads different files under different rules, so it is measured
+    # separately and compared against its own limit.
+    codex_config = read_codex_config(project_root)
+    directories, truncated = codex_directories(project_root, codex_config)
+    if truncated:
+        report.metrics["codex_scan_truncated"] = True
+    report_codex(
+        project_root, codex_chains(project_root, codex_config, directories),
+        codex_config, report,
+    )
+    report_nested_pairs(project_root, directories, codex_config, report)
 
     if targets:
         to_check = list(targets)

@@ -476,6 +476,22 @@ class TestThresholdConstants(unittest.TestCase):
             ["Rules", "Commands", "Boundaries", "Contributing", "Pointers"],
         )
 
+    def test_codex_limits(self):
+        # project_doc_max_bytes and the filename order are Codex's, not ours:
+        # codex-rs/config/defaults.toml and codex-rs/core/src/agents_md.rs.
+        self.assertEqual(ci.CODEX_DEFAULT_MAX_BYTES, 32768)
+        self.assertEqual(ci.CODEX_FILENAMES, ("AGENTS.override.md", "AGENTS.md"))
+        self.assertEqual(ci.CODEX_WARN_RATIO, 0.75)
+        self.assertEqual(ci.CODEX_COMMENT_WARN_RATIO, 0.25)
+        self.assertEqual(ci.CODEX_COMMENT_WARN_BYTES, 2048)
+
+    def test_host_table(self):
+        self.assertEqual([h.key for h in ci.HOSTS], ["claude-code", "codex"])
+        self.assertTrue(ci.CLAUDE_CODE.expands_imports)
+        self.assertTrue(ci.CLAUDE_CODE.strips_comments)
+        self.assertFalse(ci.CODEX.expands_imports)
+        self.assertFalse(ci.CODEX.strips_comments)
+
 
 class TestCapBoundaries(AgentsCase):
     def _section(self, canonical: str, n: int) -> None:
@@ -1216,9 +1232,13 @@ class TestCli(CliCase):
         self.assertEqual(sorted(payload), ["failed", "findings", "metrics"])
         self.assertEqual(payload["findings"], [])
         self.assertIs(payload["failed"], False)
-        for key in ("resolved_lines", "resolved_bytes", "raw_bytes", "closure_files"):
+        for key in ("resolved_lines", "resolved_bytes", "raw_bytes", "closure_files",
+                    "codex_chain_bytes", "codex_chain_files", "codex_max_bytes",
+                    "hosts"):
             self.assertIn(key, payload["metrics"])
         self.assertEqual(payload["metrics"]["closure_files"], ["AGENTS.md", "CLAUDE.md"])
+        self.assertEqual(payload["metrics"]["codex_chain_files"], ["AGENTS.md"])
+        self.assertEqual(payload["metrics"]["hosts"], ["claude-code", "codex"])
 
     def test_json_findings_carry_severity_code_and_line(self):
         self._pair(claude="Use plan mode.\n")
@@ -1231,7 +1251,8 @@ class TestCli(CliCase):
         for finding in payload["findings"]:
             self.assertEqual(
                 sorted(finding),
-                ["code", "file", "fix", "line", "message", "section", "severity"],
+                ["code", "file", "fix", "host", "line", "message", "section",
+                 "severity"],
             )
 
     def test_quiet_info_hides_notes_in_text_output(self):
@@ -1518,6 +1539,409 @@ class TestGateRegressions(AgentsCase):
         # Nothing new to print, but the file still fails.
         self.assertEqual(second, 1)
         self.assertIn("no findings", out)
+
+
+# --------------------------------------------------------------------------
+# The Codex load
+#
+# Codex reads AGENTS.md directly, as raw bytes, expanding no import and
+# stripping no comment, and truncates the concatenated chain at
+# project_doc_max_bytes without saying so. Every test below exists because that
+# differs from Claude Code in a way a maintainer cannot see from the file.
+# --------------------------------------------------------------------------
+
+
+def wide_lines(byte_target: int, marker: str = "x") -> str:
+    """A body of `byte_target` bytes in very few lines.
+
+    Long lines separate the two units on purpose: the result is well inside the
+    Claude Code line budget and well past Codex's byte limit, so a test can
+    assert one host's finding without the other's arriving too.
+    """
+    filler = marker * 900
+    body = ["## Rules", ""]
+    size = sum(len(x) + 1 for x in body)
+    while size < byte_target:
+        body.append("- " + filler)
+        size += len(filler) + 3
+    return "\n".join(body) + "\n"
+
+
+class TestCodexLoad(BaseCase):
+    def test_the_two_hosts_are_measured_in_different_units(self):
+        self.fx.write("AGENTS.md", wide_lines(20000))
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        report = self.fx.check()
+        # Comfortably inside the line budget, because the bytes are on few lines.
+        self.assertLess(report.metrics["resolved_lines"], ci.AGENTS_TARGET_LINES)
+        self.assertGreater(report.metrics["codex_chain_bytes"], 19000)
+
+    def test_comments_are_free_for_claude_code_and_billed_for_codex(self):
+        comment = "<!--\n" + "note about this rule\n" * 200 + "-->\n"
+        self.fx.write("AGENTS.md", comment + CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        report = self.fx.check()
+        claude_bytes = report.metrics["resolved_bytes"]
+        codex_bytes = report.metrics["codex_chain_bytes"]
+        self.assertGreater(codex_bytes, claude_bytes * 2)
+        self.assertFinding("CODEX_COMMENT_COST", severity="warn",
+                           file="AGENTS.md", report=report)
+
+    def test_a_small_comment_is_not_reported(self):
+        self.fx.write("AGENTS.md", "<!-- why this exists -->\n" + CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.assertNoCode("CODEX_COMMENT_COST")
+
+    def test_the_codex_finding_names_its_host(self):
+        comment = "<!--\n" + "note about this rule\n" * 200 + "-->\n"
+        self.fx.write("AGENTS.md", comment + CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        finding = self.assertFinding("CODEX_COMMENT_COST")
+        self.assertEqual(finding.host, "codex")
+
+
+class TestHostTableDrivesReporting(BaseCase):
+    """The Host table must be what decides, not a comment next to a check.
+
+    A field nothing reads is exactly the defect this plugin exists to catch, so
+    both behaviour flags are exercised by flipping them rather than by asserting
+    their values.
+    """
+
+    def _measured(self):
+        comment = "<!--\n" + "note about this rule\n" * 200 + "-->\n"
+        self.fx.write("AGENTS.md", comment + CONFORMING + "\n@docs/api.md\n")
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.fx.write("docs/api.md", "# API\n")
+        config = ci.read_codex_config(self.fx.root)
+        directories, _ = ci.codex_directories(self.fx.root)
+        return config, ci.codex_chains(self.fx.root, config, directories)
+
+    def _codes_for(self, host):
+        config, chains = self._measured()
+        report = ci.Report()
+        ci.report_codex(self.fx.root, chains, config, report, host=host)
+        return {f.code for f in report.findings}
+
+    def test_the_real_entry_reports_both(self):
+        codes = self._codes_for(ci.CODEX)
+        self.assertIn("CODEX_IMPORT_LITERAL", codes)
+        self.assertIn("CODEX_COMMENT_COST", codes)
+
+    def test_a_host_that_expands_imports_is_silent_about_them(self):
+        host = ci.Host("other", "Other", expands_imports=True, strips_comments=False)
+        self.assertNotIn("CODEX_IMPORT_LITERAL", self._codes_for(host))
+
+    def test_a_host_that_strips_comments_is_silent_about_their_cost(self):
+        host = ci.Host("other", "Other", expands_imports=False, strips_comments=True)
+        self.assertNotIn("CODEX_COMMENT_COST", self._codes_for(host))
+
+    def test_findings_are_labelled_with_the_host_that_produced_them(self):
+        host = ci.Host("other", "Other", expands_imports=False, strips_comments=False)
+        config, chains = self._measured()
+        report = ci.Report()
+        ci.report_codex(self.fx.root, chains, config, report, host=host)
+        literal = [f for f in report.findings if f.code == "CODEX_IMPORT_LITERAL"]
+        self.assertTrue(literal)
+        self.assertEqual(literal[0].host, "other")
+        self.assertIn("Other", literal[0].message)
+
+
+class TestCodexBudget(BaseCase):
+    def _agents(self, size: int) -> None:
+        self.fx.write("AGENTS.md", wide_lines(size))
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+
+    def test_well_under_the_limit_is_silent(self):
+        self._agents(10000)
+        self.assertNoCode("CODEX_SIZE_WARN")
+        self.assertNoCode("CODEX_SIZE_FAIL")
+
+    def test_past_three_quarters_warns(self):
+        self._agents(int(ci.CODEX_DEFAULT_MAX_BYTES * 0.8))
+        self.assertFinding("CODEX_SIZE_WARN", severity="warn", file="AGENTS.md")
+        self.assertNoCode("CODEX_SIZE_FAIL")
+
+    def test_at_the_limit_fails(self):
+        self._agents(ci.CODEX_DEFAULT_MAX_BYTES + 2000)
+        finding = self.assertFinding("CODEX_SIZE_FAIL", severity="fail",
+                                     file="AGENTS.md")
+        self.assertEqual(finding.host, "codex")
+        self.assertIn("truncates", finding.message)
+
+    def test_a_raised_project_doc_max_bytes_is_honoured(self):
+        self._agents(ci.CODEX_DEFAULT_MAX_BYTES + 2000)
+        self.fx.write(".codex/config.toml",
+                      "project_doc_max_bytes = 131072\n")
+        self.assertNoCode("CODEX_SIZE_FAIL")
+        self.assertNoCode("CODEX_SIZE_WARN")
+
+    def test_a_raised_limit_is_quoted_in_the_finding(self):
+        self._agents(70000)
+        self.fx.write(".codex/config.toml", "project_doc_max_bytes = 65536\n")
+        finding = self.assertFinding("CODEX_SIZE_FAIL")
+        self.assertIn("65536", finding.message)
+        self.assertIn(".codex/config.toml", finding.message)
+
+    def test_a_value_under_a_table_header_is_not_read(self):
+        # A key below [profiles.x] is not the active value, and this reader
+        # stops rather than guessing which profile is in use.
+        self._agents(ci.CODEX_DEFAULT_MAX_BYTES + 2000)
+        self.fx.write(".codex/config.toml",
+                      "[profiles.big]\nproject_doc_max_bytes = 131072\n")
+        self.assertFinding("CODEX_SIZE_FAIL")
+
+    def test_an_unparseable_config_falls_back_to_the_default(self):
+        self._agents(ci.CODEX_DEFAULT_MAX_BYTES + 2000)
+        self.fx.write(".codex/config.toml", "project_doc_max_bytes = huge\n")
+        self.assertFinding("CODEX_SIZE_FAIL")
+
+
+class TestCodexImports(BaseCase):
+    def test_an_import_inside_agents_md_is_reported(self):
+        body = CONFORMING + "\n@docs/api.md\n"
+        self.fx.write("AGENTS.md", body)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.fx.write("docs/api.md", "# API\n")
+        finding = self.assertFinding(
+            "CODEX_IMPORT_LITERAL", severity="warn", file="AGENTS.md",
+            line=line_of(body, "@docs/api.md"))
+        self.assertEqual(finding.host, "codex")
+
+    def test_an_import_inside_claude_md_is_not_reported(self):
+        # The stub is the one place an import belongs: Codex never reads it.
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.assertNoCode("CODEX_IMPORT_LITERAL")
+
+    def test_imports_in_fences_spans_and_comments_are_not_reported(self):
+        body = (
+            CONFORMING
+            + "\n```\n@fenced.md\n```\n\nInline `@spanned.md` here.\n"
+            + "\n<!-- @commented.md -->\n"
+        )
+        self.fx.write("AGENTS.md", body)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.assertNoCode("CODEX_IMPORT_LITERAL")
+
+    def test_a_broken_import_is_reported_by_both_hosts(self):
+        # One finding says the file does not exist; the other says the line
+        # would not load even if it did. They are different defects.
+        self.fx.write("AGENTS.md", CONFORMING + "\n@nope.md\n")
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        codes = self.fx.codes()
+        self.assertIn("IMPORT_MISSING", codes)
+        self.assertIn("CODEX_IMPORT_LITERAL", codes)
+
+
+class TestOverrideShadow(BaseCase):
+    def test_an_override_beside_agents_md_is_reported(self):
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("AGENTS.override.md", "## Rules\n\n- local only\n")
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        finding = self.assertFinding(
+            "AGENTS_OVERRIDE_SHADOW", severity="warn", file="AGENTS.override.md")
+        self.assertIn("AGENTS.md", finding.message)
+        self.assertEqual(finding.host, "codex")
+
+    def test_the_override_is_what_codex_is_measured_on(self):
+        self.fx.write("AGENTS.md", wide_lines(40000))
+        self.fx.write("AGENTS.override.md", "## Rules\n\n- local only\n")
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        report = self.fx.check()
+        # The big file is hidden from Codex, so its bytes are not in the chain.
+        self.assertLess(report.metrics["codex_chain_bytes"], 1000)
+        self.assertNoCode("CODEX_SIZE_FAIL")
+
+    def test_no_override_is_silent(self):
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.assertNoCode("AGENTS_OVERRIDE_SHADOW")
+
+
+class TestNestedPairs(BaseCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+
+    def test_a_nested_agents_md_alone_is_invisible_to_claude_code(self):
+        self.fx.write("packages/api/AGENTS.md", "## Rules\n\n- api only\n")
+        finding = self.assertFinding(
+            "NESTED_NO_CLAUDE", severity="warn", file="packages/api/AGENTS.md")
+        self.assertEqual(finding.host, "claude-code")
+        self.assertIn("packages/api/CLAUDE.md", finding.fix)
+
+    def test_a_nested_claude_md_alone_is_invisible_to_codex(self):
+        self.fx.write("packages/api/CLAUDE.md", "## Rules\n\n- api only\n")
+        finding = self.assertFinding(
+            "NESTED_NO_AGENTS", severity="warn", file="packages/api/CLAUDE.md")
+        self.assertEqual(finding.host, "codex")
+
+    def test_a_nested_pair_that_does_not_import_drifts(self):
+        self.fx.write("packages/api/AGENTS.md", "## Rules\n\n- api only\n")
+        self.fx.write("packages/api/CLAUDE.md", "## Rules\n\n- something else\n")
+        self.assertFinding("NESTED_NOT_STUB", severity="warn",
+                           file="packages/api/CLAUDE.md")
+
+    def test_a_conforming_nested_pair_is_silent(self):
+        self.fx.write("packages/api/AGENTS.md", "## Rules\n\n- api only\n")
+        self.fx.write("packages/api/CLAUDE.md", "@AGENTS.md\n")
+        for code in ("NESTED_NO_CLAUDE", "NESTED_NO_AGENTS", "NESTED_NOT_STUB"):
+            self.assertNoCode(code)
+
+    def test_a_nested_symlink_satisfies_the_stub_contract(self):
+        # The root check accepts `ln -s AGENTS.md CLAUDE.md`; a package must not
+        # be held to a different rule. Reading through the link sees the
+        # target's text, which has no @AGENTS.md line in it.
+        self.fx.write("packages/api/AGENTS.md", "## Rules\n\n- api only\n")
+        link = self.fx.root / "packages" / "api" / "CLAUDE.md"
+        try:
+            link.symlink_to("AGENTS.md")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        for code in ("NESTED_NOT_STUB", "NESTED_NO_CLAUDE", "NESTED_NO_AGENTS"):
+            self.assertNoCode(code)
+
+    def test_a_configured_fallback_filename_makes_claude_md_visible_to_codex(self):
+        # Codex reads project_doc_fallback_filenames where no AGENTS.md exists,
+        # so a repository that lists CLAUDE.md has not hidden anything from it.
+        self.fx.write(".codex/config.toml",
+                      'project_doc_fallback_filenames = ["CLAUDE.md"]\n')
+        self.fx.write("packages/api/CLAUDE.md", "## Rules\n\n- api only\n")
+        self.assertNoCode("NESTED_NO_AGENTS")
+
+    def test_without_that_configuration_it_stays_invisible(self):
+        self.fx.write("packages/api/CLAUDE.md", "## Rules\n\n- api only\n")
+        self.assertFinding("NESTED_NO_AGENTS", file="packages/api/CLAUDE.md")
+
+    def test_the_root_pair_is_not_reported_as_a_nested_pair(self):
+        for code in ("NESTED_NO_CLAUDE", "NESTED_NO_AGENTS", "NESTED_NOT_STUB"):
+            self.assertNoCode(code)
+
+    def test_a_dot_claude_stub_is_not_reported_as_a_nested_pair(self):
+        # .claude/CLAUDE.md is one of the two places the root stub may live, so
+        # it is host configuration rather than a package missing an AGENTS.md.
+        fx = Fixture()
+        self.addCleanup(fx.cleanup)
+        fx.write("AGENTS.md", CONFORMING)
+        fx.write(".claude/CLAUDE.md", "@../AGENTS.md\n")
+        codes = {f.code for f in ci.run(fx.root).findings}
+        self.assertNotIn("NESTED_NO_AGENTS", codes)
+
+
+class TestCodexChains(BaseCase):
+    def test_a_nested_file_is_measured_with_its_ancestors(self):
+        self.fx.write("AGENTS.md", wide_lines(20000))
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.fx.write("packages/api/AGENTS.md", wide_lines(20000, "y"))
+        self.fx.write("packages/api/CLAUDE.md", "@AGENTS.md\n")
+        report = self.fx.check()
+        # Neither file alone reaches the limit; the chain a session in
+        # packages/api loads does.
+        self.assertFinding("CODEX_SIZE_FAIL", file="packages/api/AGENTS.md",
+                           report=report)
+        self.assertEqual(
+            report.metrics["codex_chain_files"],
+            ["AGENTS.md", "packages/api/AGENTS.md"],
+        )
+
+    def test_an_oversized_root_is_reported_once_not_once_per_package(self):
+        # Every chain in the repository contains the root file, so every one of
+        # them is over the limit. The cause is one file and naming a package
+        # file would point at the wrong thing.
+        self.fx.write("AGENTS.md", wide_lines(ci.CODEX_DEFAULT_MAX_BYTES + 2000))
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        for name in ("a", "b", "c"):
+            self.fx.write("packages/%s/AGENTS.md" % name, "## Rules\n\n- p\n")
+            self.fx.write("packages/%s/CLAUDE.md" % name, "@AGENTS.md\n")
+        report = self.fx.check()
+        fails = [f for f in report.findings if f.code == "CODEX_SIZE_FAIL"]
+        self.assertEqual([f.file for f in fails], ["AGENTS.md"], describe(report))
+
+    def test_a_package_over_the_limit_under_a_clean_root_is_still_reported(self):
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.fx.write("packages/big/AGENTS.md",
+                      wide_lines(ci.CODEX_DEFAULT_MAX_BYTES + 2000))
+        self.fx.write("packages/big/CLAUDE.md", "@AGENTS.md\n")
+        self.assertFinding("CODEX_SIZE_FAIL", file="packages/big/AGENTS.md")
+
+    def test_a_file_is_reported_once_however_many_chains_contain_it(self):
+        self.fx.write("AGENTS.md", CONFORMING + "\n@docs/api.md\n")
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.fx.write("docs/api.md", "# API\n")
+        self.fx.write("packages/a/AGENTS.md", "## Rules\n\n- a\n")
+        self.fx.write("packages/a/CLAUDE.md", "@AGENTS.md\n")
+        self.fx.write("packages/b/AGENTS.md", "## Rules\n\n- b\n")
+        self.fx.write("packages/b/CLAUDE.md", "@AGENTS.md\n")
+        report = self.fx.check()
+        literal = [f for f in report.findings if f.code == "CODEX_IMPORT_LITERAL"]
+        self.assertEqual(len(literal), 1, describe(report))
+
+
+class TestRepeatedFindingCap(BaseCase):
+    """A defect repeated once per package must not bury the rest of the report.
+
+    The cap exists because a monorepo can produce hundreds of instances of one
+    code with one fix. It must never be silent about what it withheld.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+        self.packages = ci.REPEATED_FINDING_CAP + 7
+        for i in range(self.packages):
+            self.fx.write("packages/p%d/AGENTS.md" % i, "## Rules\n\n- p\n")
+
+    def test_only_the_cap_is_listed(self):
+        report = self.fx.check()
+        listed = [f for f in report.findings if f.code == "NESTED_NO_CLAUDE"]
+        self.assertEqual(len(listed), ci.REPEATED_FINDING_CAP)
+
+    def test_the_remainder_is_stated_not_dropped(self):
+        finding = self.assertFinding("MORE_OF_THE_SAME", severity="info")
+        self.assertIn(str(self.packages - ci.REPEATED_FINDING_CAP), finding.message)
+        self.assertIn(str(self.packages), finding.message)
+        self.assertIn("NESTED_NO_CLAUDE", finding.message)
+
+    def test_under_the_cap_there_is_no_summary(self):
+        fx = Fixture()
+        self.addCleanup(fx.cleanup)
+        fx.write("AGENTS.md", CONFORMING)
+        fx.write("CLAUDE.md", "@AGENTS.md\n")
+        fx.write("packages/one/AGENTS.md", "## Rules\n\n- p\n")
+        codes = {f.code for f in ci.run(fx.root).findings}
+        self.assertIn("NESTED_NO_CLAUDE", codes)
+        self.assertNotIn("MORE_OF_THE_SAME", codes)
+
+    def test_a_capped_code_does_not_hide_a_different_one(self):
+        # The point of the cap: other findings still get through.
+        self.fx.write("packages/p0/CLAUDE.md", "## Rules\n\n- drifted\n")
+        codes = self.fx.codes()
+        self.assertIn("NESTED_NOT_STUB", codes)
+        self.assertIn("MORE_OF_THE_SAME", codes)
+
+
+class TestCodexScan(BaseCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.fx.write("AGENTS.md", CONFORMING)
+        self.fx.write("CLAUDE.md", "@AGENTS.md\n")
+
+    def test_vendored_trees_are_not_walked(self):
+        for skipped in ("node_modules/pkg", "dist", "build", "__pycache__"):
+            self.fx.write(skipped + "/AGENTS.md", "## Rules\n\n- vendored\n")
+        self.assertNoCode("NESTED_NO_CLAUDE")
+
+    def test_dot_directories_other_than_host_config_are_not_walked(self):
+        self.fx.write(".cache/AGENTS.md", "## Rules\n\n- cached\n")
+        self.assertNoCode("NESTED_NO_CLAUDE")
+
+    def test_an_ordinary_package_is_walked(self):
+        self.fx.write("packages/api/AGENTS.md", "## Rules\n\n- api\n")
+        self.assertFinding("NESTED_NO_CLAUDE", file="packages/api/AGENTS.md")
 
 
 if __name__ == "__main__":

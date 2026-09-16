@@ -121,10 +121,13 @@ python3 scripts/check_instructions.py --project-root /path/to/repo
 
 Whenever either file of the pair exists the run prints the budget first, a
 clean one included, because a conforming file produces no findings and the
-number is still worth seeing:
+number is still worth seeing. There is one line per host, and the units differ
+because the runtimes do — Claude Code loads a resolved import closure and Codex
+loads bytes from disk:
 
 ```
-instruction-keeper: 18 lines / 0.3 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 18 lines / 0.3 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 0.3 KB over AGENTS.md (limit 32 KB, truncated silently past it).
 instruction-keeper: no findings.
 ```
 
@@ -132,7 +135,7 @@ instruction-keeper: no findings.
 |---|---|
 | `[paths ...]` | Redirect the per-file structural checks to these files. The root-pair contract checks and the budget still run. A relative path resolves against `--project-root`, not against the shell's working directory. A path that does not exist is reported as `TARGET_MISSING` rather than passing in silence. Naming `CLAUDE.md` while `AGENTS.md` exists yields the `TARGET_IS_STUB` note: the section and cap checks live on `AGENTS.md`. |
 | `--project-root DIR` | Repository root. Defaults to the `CLAUDE_PROJECT_DIR` environment variable, then the working directory. |
-| `--json` | Machine-readable output: `findings`, `failed`, and `metrics` — `resolved_lines`, `resolved_bytes`, `raw_bytes`, `closure_files`, the same numbers as the budget line. |
+| `--json` | Machine-readable output: `findings`, `failed`, and `metrics` — `resolved_lines`, `resolved_bytes`, `raw_bytes`, `closure_files`, `codex_chain_bytes`, `codex_chain_files`, `codex_max_bytes` and `hosts`, the same numbers as the budget lines. Each finding carries a `host` field naming the runtime it concerns, or `null` when it concerns both. |
 | `--quiet-info` | Hide informational findings. Works with `--json` as well as with the text output. |
 | `--new-only` | Report only findings not seen on the previous run, and update the baseline. Findings are keyed by file, code, section and message, deliberately not by line number, so inserting a paragraph does not re-report everything below it. Used by the hook. |
 
@@ -146,7 +149,8 @@ most codes are warnings — a file can be well over the target, past the 200-lin
 warning threshold, and still pass CI:
 
 ```
-instruction-keeper: 247 lines / 4.3 KB over AGENTS.md, extra.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 247 lines / 4.3 KB over AGENTS.md, extra.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 4.1 KB over AGENTS.md (limit 32 KB, truncated silently past it).
 
 WARN  AGENTS.md  [SIZE_WARN]
       247 lines / 4.3 KB (resolved over 3 files: AGENTS.md, extra.md, CLAUDE.md). Over the 200-line warning threshold; the target is 120.
@@ -155,17 +159,33 @@ WARN  AGENTS.md  [SIZE_WARN]
 0 failure(s), 1 warning(s), 0 note(s).
 ```
 
-That run exits `0`. The thirteen fail codes are the whole of what an unmodified
+That run exits `0`. The fourteen fail codes are the whole of what an unmodified
 CI gate catches:
 
-`SIZE_FAIL`, `SECTION_CAP_FAIL` (past double a section's cap), `CLAUDE_TOO_LONG`,
-`CLAUDE_NO_IMPORT`, `CLAUDE_DUPLICATES_AGENTS`, `CLAUDE_BROKEN_SYMLINK`,
-`BOUNDARIES_DIAGRAM`, `BOUNDARIES_IMAGE`, `BOUNDARIES_TREE`, `FENCE_UNCLOSED`,
-`HTML_COMMENT_UNCLOSED`, `SPECKIT_UNBALANCED`, `SPECKIT_REVERSED`.
+`SIZE_FAIL`, `CODEX_SIZE_FAIL`, `SECTION_CAP_FAIL` (past double a section's cap),
+`CLAUDE_TOO_LONG`, `CLAUDE_NO_IMPORT`, `CLAUDE_DUPLICATES_AGENTS`,
+`CLAUDE_BROKEN_SYMLINK`, `BOUNDARIES_DIAGRAM`, `BOUNDARIES_IMAGE`,
+`BOUNDARIES_TREE`, `FENCE_UNCLOSED`, `HTML_COMMENT_UNCLOSED`,
+`SPECKIT_UNBALANCED`, `SPECKIT_REVERSED`.
 
-Twenty-two further codes are warnings and ten are notes. To gate on more than the
-failures, read `--json` and pick the threshold you want; the severities here are
-set for an interactive editing loop, not for a build.
+`CODEX_SIZE_FAIL` is the only one of the two size codes that fails, because the
+two outcomes are not comparable: a file past the Claude Code warning threshold
+still loads whole, while a chain past `project_doc_max_bytes` is cut off
+mid-line in Codex with nothing said about it.
+
+Thirty-eight further codes are warnings — nine of them the `SPLIT_*` family, one
+per kind of content that belongs somewhere other than an instruction file — and
+eleven are notes. To gate on more than the failures, read `--json` and pick the
+threshold you want; the severities here are set for an interactive editing loop,
+not for a build.
+
+One code is about the report rather than the files. A defect that repeats once
+per package — a monorepo with two hundred nested `AGENTS.md` files and no stubs
+beside them — is one defect with one fix, and listing it two hundred times
+buries everything else. At most ten instances of a code are listed; the rest
+become a single `MORE_OF_THE_SAME` note stating the code and the true total.
+The cap applies to `--json` as well as to the text output, and is never
+silent.
 
 ### What the checker can and cannot do
 

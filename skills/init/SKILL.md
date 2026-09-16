@@ -28,12 +28,12 @@ ls -a "${CLAUDE_PROJECT_DIR}"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py" --project-root "${CLAUDE_PROJECT_DIR}"
 ```
 
-`${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code. If the literal text
-`${CLAUDE_PLUGIN_ROOT}` reaches the shell, or the path expands to nothing, the
-host does not substitute it: find `scripts/check_instructions.py` under the
-installed plugin directory and use that path instead. The same applies to
-`${CLAUDE_PROJECT_DIR}` — fall back to the repository root of the working
-directory.
+`${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code and not by every host. If
+the literal text reaches the shell or the path expands to nothing, derive it
+instead: this file is at `<plugin root>/skills/<name>/SKILL.md`, so the plugin
+root is two directories above the one holding this file, and the checker is at
+`<plugin root>/scripts/check_instructions.py`. Substitute `${CLAUDE_PROJECT_DIR}`
+the same way — it is the repository root of the working directory.
 
 Read the budget line: it names the files already in play. A project
 `CLAUDE.md` lives at either `CLAUDE.md` or `.claude/CLAUDE.md`, and this skill

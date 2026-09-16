@@ -1,0 +1,50 @@
+<!-- Preamble, no heading, at most 2 lines: what is this repository responsible
+     for? Delete it if the name and top-level layout already answer that. -->
+ACME API owns the public REST surface and the webhook dispatcher. Billing lives
+in the separate `acme-billing` repository.
+
+<!-- Rules, cap 40 lines: what must hold on every change? Delete anything a
+     formatter, linter, type checker or CI already fails on; name that check in
+     Commands instead. -->
+## Rules
+
+- Never weaken or delete an existing test to make a change pass.
+- Webhook payloads are versioned; adding a field is allowed, renaming one is not.
+- `src/db/generated/` is generated; edit `schema.prisma` and regenerate instead.
+
+<!-- Commands, cap 25 lines: how do I build, run and verify? Copy-pasteable,
+     repository-owned, narrowest loop first. Not a setup tutorial. -->
+## Commands
+
+Requires Node 20 and a running Postgres on `DATABASE_URL`.
+
+```bash
+pnpm install
+pnpm test path/to/file.test.ts   # one file, fastest loop
+pnpm test                        # full suite
+pnpm lint                        # also enforces the dependency direction
+```
+
+<!-- Boundaries, cap 15 lines, usually absent: ownership and dependency
+     direction as sentences. No trees, maps, diagrams or rationale. -->
+## Boundaries
+
+`src/api/` may import from `src/db/`, never the reverse. `pnpm lint` enforces it.
+
+<!-- Contributing, cap 20 lines: how a change reaches main and what the agent
+     may do. Facts, not steps; a numbered procedure is a skill named here. -->
+## Contributing
+
+Branch as `feat/<slug>`. PR titles follow Conventional Commits. Do not push to
+`main` and do not open a PR on my behalf without asking.
+
+<!-- Pointers, cap 10 lines: each line says what is in the target and when to
+     read it. Do not list .claude/rules/ or skills; the runtime finds both. -->
+## Pointers
+
+- [docs/webhooks.md](docs/webhooks.md) — payload versions and the retry ladder;
+  read before touching the dispatcher.
+
+<!-- If this repository uses Spec Kit's agent-context extension, its managed
+     block goes last, is owned entirely by Spec Kit, and is never edited by
+     hand. See .specify/extensions/agent-context/agent-context-config.yml. -->

@@ -96,13 +96,16 @@ conventions.
 `.claude/rules/` with `paths:` frontmatter, or a nested pair inside the package
 it belongs to: an `AGENTS.md` carrying only what differs there, and a
 `CLAUDE.md` beside it whose whole content is `@AGENTS.md`. Both halves are
-needed. Claude Code reads `CLAUDE.md` and never `AGENTS.md`, at any level; it
-discovers a nested `CLAUDE.md` under the working directory and includes it when
-it reads files in that directory, so the nested `CLAUDE.md` is the half that
-makes the package's rules reach Claude at all, while the nested `AGENTS.md`
-reaches coding agents that read `AGENTS.md`. A nested pair and a path-scoped rule both reduce
-context, because each loads only when Claude reads a matching file. An `@path`
-import does not: imported files load at launch.
+needed, because the two runtimes read nested files as exact opposites. Claude
+Code reads `CLAUDE.md` and never `AGENTS.md`, at any level, and discovers a
+nested `CLAUDE.md` under the working directory when it reads files there. Codex
+walks from the project root down to the working directory taking one file per
+directory and never reads a `CLAUDE.md`. So the nested `CLAUDE.md` is the half
+that reaches Claude and the nested `AGENTS.md` is the half that reaches Codex.
+A nested pair and a path-scoped rule both reduce context, because each loads
+only when the agent is working in that part of the tree. An `@path` import does
+not: in Claude Code imported files load at launch, and in Codex they do not load
+at all.
 
 **Procedures.** Flag any section that has grown from a fact into a sequence of
 steps. That is a skill.
@@ -131,15 +134,19 @@ Whenever either file of the pair exists, the text output prints one budget line
 first, on a clean run too:
 
 ```
-instruction-keeper: 412 lines / 19.4 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Claude Code loads 412 lines / 19.4 KB over AGENTS.md, CLAUDE.md (target 120, warn 200, fail 400).
+instruction-keeper: Codex loads 21.8 KiB over AGENTS.md (limit 32 KiB, truncated silently past it).
 ```
 
-Under `--json` the same figures are `metrics.resolved_lines`,
-`metrics.resolved_bytes` and `metrics.closure_files`. The count covers the union
-of the `AGENTS.md` and `CLAUDE.md` `@`-import closures, de-duplicated, with
-block-level HTML comments stripped and blank lines counted. Report it against
-the 120-line target, the 200-line warning and the 400-line ceiling, and name the
-closure files when `metrics.closure_files` holds more than one.
+Report both, and never collapse them into one number. Under `--json` the first
+is `metrics.resolved_lines`, `metrics.resolved_bytes` and
+`metrics.closure_files` — the union of the `AGENTS.md` and `CLAUDE.md`
+`@`-import closures, de-duplicated, with block-level HTML comments stripped and
+blank lines counted — against the 120-line target, the 200-line warning and the
+400-line ceiling. The second is `metrics.codex_chain_bytes`,
+`metrics.codex_chain_files` and `metrics.codex_max_bytes` — raw bytes on disk
+with nothing stripped and nothing expanded — against `project_doc_max_bytes`.
+Name the files when either list holds more than one.
 
 **Checker findings** — a table: severity, file:line, code, message. Reproduce
 the checker's numbers exactly; do not paraphrase them.
@@ -156,9 +163,10 @@ the checker's numbers exactly; do not paraphrase them.
 line count each one saves and where it goes.
 
 **Not checked** — state plainly which criteria you could not evaluate and why.
-Silence must never read as approval. Say here that the checker governs the
-repository-root pair only, so nothing it printed covers a nested pair in a
-monorepo package.
+Silence must never read as approval. Say here that a nested pair is checked for
+existence and for the import between them and not for its content, so nothing
+the checker printed evaluates what a package's own rules say. If a
+`MORE_OF_THE_SAME` note appeared, say how many findings were withheld.
 
 ## Rules for your own behaviour
 

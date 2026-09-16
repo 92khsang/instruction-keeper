@@ -752,6 +752,11 @@ def read_codex_config(project_root: Path) -> CodexConfig:
     this cannot read is left at its default rather than guessed at, because a
     wrong budget produces a wrong finding and this checker's contract is
     precision over recall.
+
+    ``project_root_markers`` is deliberately **not** read from here even though
+    it lives in the same file. Codex composes project-root discovery from the
+    non-project layers only, so a repository cannot change where its own root
+    is; honouring it here would model a behaviour Codex does not have.
     """
     path = project_root / ".codex" / "config.toml"
     try:
@@ -1482,11 +1487,11 @@ def report_codex(
                 f" {host.label} loads this as a chain of {len(chain.files)} files: "
                 + ", ".join(rel(root, f.path) for f in chain.files) + "."
             )
-        kb = chain.raw_bytes / 1024
+        kib = chain.raw_bytes / 1024
         if chain.raw_bytes >= limit:
             capped.add(
                 "fail", "CODEX_SIZE_FAIL", name,
-                f"{chain.raw_bytes} bytes / {kb:.1f} KB on disk, at or over the "
+                f"{chain.raw_bytes} bytes / {kib:.1f} KiB on disk, at or over the "
                 f"{limit}-byte project_doc_max_bytes.{chain_note} {host.label} "
                 f"truncates on a byte boundary and warns nobody, so the tail of "
                 f"this file is silently absent.{budget_note}",
@@ -1500,7 +1505,7 @@ def report_codex(
         elif chain.raw_bytes >= warn_at:
             capped.add(
                 "warn", "CODEX_SIZE_WARN", name,
-                f"{chain.raw_bytes} bytes / {kb:.1f} KB on disk, past "
+                f"{chain.raw_bytes} bytes / {kib:.1f} KiB on disk, past "
                 f"{int(CODEX_WARN_RATIO * 100)}% of the {limit}-byte "
                 f"project_doc_max_bytes.{chain_note}{budget_note}",
                 host=host.key,
@@ -2262,10 +2267,13 @@ def budget_line(report: Report) -> Optional[str]:
         limit = int(report.metrics.get("codex_max_bytes", CODEX_DEFAULT_MAX_BYTES))
         files = report.metrics.get("codex_chain_files") or []
         over = ", ".join(str(f) for f in files)
+        # KiB rather than the KB the Claude Code line uses: Codex's limit is a
+        # binary quantity documented as 32 KiB, and rounding it to a decimal
+        # kilobyte in the same breath as the exact byte counts would be wrong.
         out.append(
             f"instruction-keeper: {CODEX.label} loads "
-            f"{float(codex_bytes) / 1024:.1f} KB over {over} "
-            f"(limit {float(limit) / 1024:.0f} KB, truncated silently past it)."
+            f"{float(codex_bytes) / 1024:.1f} KiB over {over} "
+            f"(limit {float(limit) / 1024:.0f} KiB, truncated silently past it)."
         )
     return "\n".join(out) if out else None
 

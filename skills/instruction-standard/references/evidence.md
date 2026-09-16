@@ -202,6 +202,47 @@ A limit raised in a user's own `~/.codex/config.toml` is invisible to the
 repository and is not modelled: the checker measures what a teammate with a
 default installation would get.
 
+### Codex's plugin and hook surfaces
+
+Relevant because this plugin ships into both runtimes from one directory. Read
+from the same revision, and from
+[learn.chatgpt.com/docs/hooks](https://learn.chatgpt.com/docs/hooks) and
+[/docs/plugins](https://learn.chatgpt.com/docs/plugins).
+
+- `DISCOVERABLE_PLUGIN_MANIFEST_PATHS` is `[".codex-plugin/plugin.json",
+  ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json"]`, tried after a
+  root `plugin.json` carrying an Agent Plugins schema. Codex therefore reads a
+  Claude Code plugin manifest as-is.
+- `HookToolName::apply_patch()` carries the matcher aliases `Write` and `Edit`,
+  commented "for compatibility with hook configurations that describe edits
+  using Claude Code-style names". The serialized `tool_name` stays
+  `apply_patch`.
+- The hook environment includes `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA`
+  beside `PLUGIN_ROOT` and `PLUGIN_DATA`, commented "For OOTB compat with
+  existing plugins that use this env var". There is no `CLAUDE_PROJECT_DIR`.
+- `HookHandlerConfig::Command` has `command`, `commandWindows`, `timeout`,
+  `async`, `statusMessage` and `additionalContextLimit`. **No `args`**, so an
+  exec-form hook config deserializes with the script dropped.
+- `tool_input.command` for `apply_patch` is the raw patch text:
+  `apply_patch_payload_command` returns the `ToolPayload::Custom` input
+  verbatim. The file markers are `*** Add File:`, `*** Update File:`,
+  `*** Delete File:` and `*** Move to:`.
+- `resolve_manifest_hooks` returns `None` when the manifest omits `hooks`, so a
+  plugin must declare the path. `plugin_skill_roots` does fall back to
+  `<plugin_root>/skills`, so skills are discovered.
+- Model-visible hook output defaults to roughly 2,500 tokens before spilling to
+  disk, against Claude Code's 10,000-character cap.
+- Codex subagents are TOML files under `.codex/agents/` requiring `name`,
+  `description` and `developer_instructions`. The plugin manifest has no
+  `agents` field and nothing documents a plugin shipping one.
+- **Not established:** whether Codex substitutes `${CLAUDE_PLUGIN_ROOT}` or any
+  placeholder inside a `SKILL.md` body. Nothing in `codex-rs/ext/skills`
+  performs a substitution, and the hook environment that carries the variable
+  is built in `codex-rs/hooks/src/engine/discovery.rs`, which is the hook path
+  and not the skill path. Absence of evidence in a source reading is weaker
+  than a documented denial, so this is recorded as unknown rather than as a
+  negative finding.
+
 Together these make the two runtimes exact opposites below the repository root:
 Codex loads a nested `AGENTS.md` and never a `CLAUDE.md`; Claude Code loads a
 nested `CLAUDE.md` and never an `AGENTS.md`.

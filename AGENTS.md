@@ -11,7 +11,10 @@ CLAUDE.md standard and ships the checker, skills, agent and hook that apply it.
   treat a rename or a severity change as breaking.
 - The hook never blocks and never raises. It exits 0 on every path, reports
   through `hookSpecificOutput.additionalContext`, and keeps `systemMessage` to
-  one line because that field reaches the user and not Claude.
+  one line because that field reaches the user and not the model.
+- One hooks file serves both runtimes. Codex has no `args` array, so the
+  command stays a single quoted string, and `hooks` must stay declared in the
+  manifest because Codex has no default path for it.
 - A check belongs in the checker only when it is deterministic and
   high-precision. Judgment — whether a linter already enforces a rule, whether
   a line is inferable from the code — belongs to the audit skill and the
@@ -19,10 +22,10 @@ CLAUDE.md standard and ships the checker, skills, agent and hook that apply it.
 - Every claim about how an agent runtime behaves carries a citation in
   `evidence.md` or is generalized until it needs none. Do not invent a source,
   a figure, or a vendor's behaviour.
-- Where the plugin runs and what the checker models are different scopes. The
-  plugin is tested on Claude Code on Linux and macOS, because that is what CI
-  runs; the checker models Claude Code and Codex. Widen either in the README
-  only after a run, not after reading the code.
+- Where the plugin runs and what the checker models are different scopes, and
+  the README states each separately. CI runs Claude Code on Linux and macOS;
+  Codex support is implemented and not yet witnessed inside a running Codex
+  CLI. Widen either claim only after a run, not after reading the code.
 - Claude Code reads `CLAUDE.md`, never `AGENTS.md`, at any level. Codex reads
   `AGENTS.md` as raw bytes from the project root down to the cwd, expands no
   import, strips no comment, and truncates silently at 32 KiB. Below the root
@@ -51,11 +54,14 @@ plugin root — hence the stub at `.claude/CLAUDE.md` — and on a local, gitign
 `CLAUDE.local.md`, which a clean checkout does not have.
 
 The hook reads a PostToolUse payload on stdin and prints nothing when it has
-nothing to report:
+nothing to report. Both payload shapes are worth running by hand — Codex names
+no file and sets no project directory:
 
 ```bash
 echo "{\"tool_input\":{\"file_path\":\"$PWD/AGENTS.md\"}}" |
   CLAUDE_PROJECT_DIR="$PWD" python3 scripts/hook_post_edit.py
+echo "{\"tool_input\":{\"command\":\"*** Update File: AGENTS.md\"}}" |
+  env -u CLAUDE_PROJECT_DIR python3 scripts/hook_post_edit.py
 ```
 
 ## Boundaries

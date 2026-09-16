@@ -109,6 +109,29 @@ class HookCase(unittest.TestCase):
             "tool_response": {"filePath": str(file_path), "success": True},
         }
 
+    def codex_payload(self, patch_body, cwd=None) -> dict:
+        """A Codex PostToolUse payload for apply_patch.
+
+        Codex serializes the raw patch text as ``tool_input.command`` and sets
+        no project-directory variable, so tests using this must also pass
+        ``project_dir=None``.
+        https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/handlers/apply_patch.rs
+        """
+        patch = "*** Begin Patch\n%s\n*** End Patch" % patch_body
+        return {
+            "session_id": "test-session",
+            "turn_id": "turn-1",
+            "transcript_path": str(self.base / "transcript.jsonl"),
+            "cwd": str(cwd if cwd is not None else self.root),
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.3-codex",
+            "permission_mode": "default",
+            "tool_name": "apply_patch",
+            "tool_use_id": "call-1",
+            "tool_input": {"command": patch},
+            "tool_response": {"output": "Done"},
+        }
+
     def run_hook(self, payload, project_dir="", stdin=None, hook=None) -> HookResult:
         """Run the hook once.
 
@@ -234,17 +257,48 @@ class TestFailOpen(HookCase):
 
 
 class TestScope(HookCase):
-    def test_nested_package_agents_is_out_of_scope(self):
-        # A nested AGENTS.md in a monorepo package is a legitimate pattern the
-        # plugin deliberately does not govern.
+    def test_a_nested_package_file_is_in_scope(self):
+        # The checker measures nested pairs and counts nested files toward the
+        # Codex byte chain, so an edit to one can change what it reports. A
+        # hook that stayed silent here would be inconsistent with the checker
+        # it runs.
         self.write("AGENTS.md", CONFORMING)
+        self.write("CLAUDE.md", "@AGENTS.md\n")
         nested = self.write("packages/api/AGENTS.md", "## Rules\n\n- a nested rule\n")
-        self.assertSilent(self.run_hook(self.payload(nested)))
+        payload = self.assertNeverBlocks(self.run_hook(self.payload(nested)))
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("packages/api/AGENTS.md", context)
+        self.assertIn("[claude-code]", context)
 
-    def test_nested_package_claude_md_is_out_of_scope(self):
+    def test_a_nested_claude_md_is_in_scope(self):
         self.write("AGENTS.md", CONFORMING)
-        nested = self.write("packages/api/CLAUDE.md", "@AGENTS.md\n")
-        self.assertSilent(self.run_hook(self.payload(nested)))
+        self.write("CLAUDE.md", "@AGENTS.md\n")
+        nested = self.write("packages/api/CLAUDE.md", "## Rules\n\n- drifted\n")
+        payload = self.assertNeverBlocks(self.run_hook(self.payload(nested)))
+        self.assertIn("packages", payload["hookSpecificOutput"]["additionalContext"])
+
+    def test_a_vendored_instruction_file_is_out_of_scope(self):
+        # The checker does not walk these directories, so the hook must not
+        # wake up for them either.
+        #
+        # The repository is left with a standing finding on purpose -- AGENTS.md
+        # with no CLAUDE.md beside it. Once the hook decides to run it reports
+        # everything new anywhere in the repository, so with a clean fixture it
+        # would stay silent whether the scope check worked or not, and the test
+        # would prove nothing.
+        self.write("AGENTS.md", CONFORMING)
+        vendored = self.write("node_modules/pkg/AGENTS.md", "## Rules\n\n- theirs\n")
+        self.assertSilent(self.run_hook(self.payload(vendored)))
+
+    def test_the_same_repository_does_emit_for_a_file_in_scope(self):
+        # The companion the previous test needs: the silence there is the scope
+        # check and not an empty report.
+        self.write("AGENTS.md", CONFORMING)
+        self.write("node_modules/pkg/AGENTS.md", "## Rules\n\n- theirs\n")
+        agents = self.root / "AGENTS.md"
+        payload = self.assertNeverBlocks(self.run_hook(self.payload(agents)))
+        self.assertIn("CLAUDE.md",
+                      payload["hookSpecificOutput"]["additionalContext"])
 
     def test_dot_claude_claude_md_is_in_scope(self):
         # Claude Code reads a project memory from .claude/CLAUDE.md as well, and
@@ -266,16 +320,111 @@ class TestScope(HookCase):
         payload = self.assertNeverBlocks(result)
         self.assertIn("additionalContext", payload["hookSpecificOutput"])
 
-    def test_without_claude_project_dir_a_drifted_cwd_loses_the_root_pair(self):
+    def test_without_the_variable_or_a_git_dir_a_drifted_cwd_loses_the_root(self):
         # The contrast that makes the previous test meaningful: with only the
-        # payload cwd to go on, the root pair stops being recognized as the
-        # root pair.
+        # payload cwd to go on and no marker to walk up to, the root pair stops
+        # being recognized as the root pair.
         agents = self.write("AGENTS.md", CONFORMING)
         drifted = self.root / "packages" / "api"
         drifted.mkdir(parents=True)
         self.assertSilent(
             self.run_hook(self.payload(agents, cwd=drifted), project_dir=None)
         )
+
+    def test_without_the_variable_a_git_dir_recovers_the_root(self):
+        # This is the path Codex takes: it sets no project-directory variable,
+        # and finds the root by walking up for .git, its default
+        # project_root_markers. Without this the hook would measure a package
+        # directory as if it were the repository.
+        (self.root / ".git").mkdir()
+        agents = self.write("AGENTS.md", CONFORMING)
+        drifted = self.root / "packages" / "api"
+        drifted.mkdir(parents=True)
+        payload = self.assertNeverBlocks(
+            self.run_hook(self.payload(agents, cwd=drifted), project_dir=None)
+        )
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("CLAUDE.md", context)
+
+
+class TestCodexPayload(HookCase):
+    """Codex delivers the same event with a different payload.
+
+    It names no file: `tool_input.command` holds the raw patch, and the files
+    an edit touched are the ones the apply_patch envelope names. It also sets
+    no project-directory variable, so every test here passes
+    `project_dir=None` and puts a `.git` at the root the way a real repository
+    has one.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / ".git").mkdir()
+
+    def _codex(self, patch_body, cwd=None):
+        return self.run_hook(
+            self.codex_payload(patch_body, cwd=cwd), project_dir=None)
+
+    def test_an_updated_agents_md_is_recognized(self):
+        self.write("AGENTS.md", CONFORMING)
+        payload = self.assertNeverBlocks(
+            self._codex("*** Update File: AGENTS.md\n@@\n-old\n+new"))
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("CLAUDE.md", context)
+
+    def test_an_added_file_is_recognized(self):
+        self.write("AGENTS.md", CONFORMING)
+        self.assertNeverBlocks(
+            self._codex("*** Add File: packages/api/AGENTS.md\n+## Rules"))
+
+    def test_a_deleted_file_is_recognized(self):
+        self.write("AGENTS.md", CONFORMING)
+        self.assertNeverBlocks(self._codex("*** Delete File: CLAUDE.md"))
+
+    def test_a_move_target_is_recognized(self):
+        self.write("AGENTS.md", CONFORMING)
+        self.assertNeverBlocks(
+            self._codex("*** Update File: notes.md\n*** Move to: AGENTS.md\n"
+                        "@@\n-a\n+b"))
+
+    def test_a_patch_touching_nothing_watched_is_silent(self):
+        self.write("AGENTS.md", CONFORMING)
+        self.write("CLAUDE.md", "@AGENTS.md\n")
+        self.assertSilent(
+            self._codex("*** Update File: src/main.py\n@@\n-a\n+b"))
+
+    def test_a_patch_path_resolves_against_the_payload_cwd(self):
+        # apply_patch states paths relative to the working directory, which in
+        # a Codex session may be a package rather than the repository root.
+        self.write("AGENTS.md", CONFORMING)
+        package = self.root / "packages" / "api"
+        package.mkdir(parents=True)
+        self.assertNeverBlocks(
+            self._codex("*** Add File: AGENTS.md\n+## Rules", cwd=package))
+
+    def test_the_audit_hint_does_not_offer_a_claude_code_command(self):
+        # /instruction-keeper:audit is a Claude Code slash command. Offering it
+        # to a Codex session is an instruction that cannot be followed.
+        self.write("AGENTS.md", CONFORMING)
+        payload = self.assertNeverBlocks(
+            self._codex("*** Update File: AGENTS.md\n@@\n-old\n+new"))
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("/instruction-keeper:audit", context)
+        self.assertIn("--new-only", context)
+
+    def test_claude_code_still_gets_its_slash_command(self):
+        self.write("AGENTS.md", CONFORMING)
+        agents = self.root / "AGENTS.md"
+        payload = self.assertNeverBlocks(self.run_hook(self.payload(agents)))
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("/instruction-keeper:audit", context)
+
+    def test_a_malformed_patch_never_raises(self):
+        self.write("AGENTS.md", CONFORMING)
+        for body in ("*** ", "*** Update File:", "*** Update File: \n",
+                     "*** Move to:", "not a patch at all"):
+            result = self._codex(body)
+            self.assertExitsCleanly(result)
 
 
 class TestDiffScoping(HookCase):
@@ -328,11 +477,53 @@ class TestHookRegistration(unittest.TestCase):
         matcher = entries[0]["matcher"]
         self.assertEqual(sorted(matcher.split("|")), ["Edit", "Write"])
 
-    def test_command_points_at_the_hook_script(self):
+    def test_matcher_is_also_what_codex_accepts(self):
+        # Codex serializes apply_patch as the tool name but accepts Write and
+        # Edit as matcher aliases for it, so one matcher serves both runtimes
+        # and there is no Codex-specific hooks file to keep in step.
+        # https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/hook_names.rs
+        matcher = self.config["hooks"]["PostToolUse"][0]["matcher"]
+        self.assertEqual(sorted(matcher.split("|")), ["Edit", "Write"])
+
+    def test_command_is_one_string_because_codex_has_no_args_field(self):
+        # Codex's HookHandlerConfig::Command has only `command`. An exec form
+        # would deserialize there with the script silently dropped, leaving
+        # bare `python3` reading the payload as a program.
         hook = self.config["hooks"]["PostToolUse"][0]["hooks"][0]
         self.assertEqual(hook["type"], "command")
-        self.assertEqual(hook["command"], "python3")
-        self.assertEqual(hook["args"], ["${CLAUDE_PLUGIN_ROOT}/scripts/hook_post_edit.py"])
+        self.assertNotIn("args", hook)
+        self.assertEqual(
+            hook["command"],
+            'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hook_post_edit.py"',
+        )
+
+    def test_the_context_limit_is_set_rather_than_left_to_a_default(self):
+        # Codex spills model-visible hook output past roughly 2,500 tokens to
+        # disk. Naming the limit keeps the behaviour from depending on a
+        # default that the script's own cap happens to sit near.
+        hook = self.config["hooks"]["PostToolUse"][0]["hooks"][0]
+        self.assertIn("additionalContextLimit", hook)
+
+    def test_the_manifest_declares_the_hooks_file(self):
+        # Codex has no default hooks path: resolve_manifest_hooks returns None
+        # when the manifest omits the field, so a plugin that relies on Claude
+        # Code's discovery ships no hook at all to Codex.
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["hooks"], "./hooks/hooks.json")
+        self.assertTrue((PLUGIN_ROOT / "hooks" / "hooks.json").is_file())
+
+    def test_the_two_manifests_state_the_same_version(self):
+        plugin = json.loads(
+            (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        marketplace = json.loads(
+            (PLUGIN_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+        )
+        entry = marketplace["plugins"][0]
+        self.assertEqual(entry["version"], plugin["version"])
+        self.assertEqual(entry["description"], plugin["description"])
 
 
 if __name__ == "__main__":

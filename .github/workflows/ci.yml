@@ -61,6 +61,49 @@ jobs:
       - name: Instruction files
         run: python3 scripts/check_instructions.py --project-root .
 
+      # The hook config is executed the way a host executes it, rather than
+      # only parsed by a test. The Codex form is the one at risk: its command is
+      # a single string, so a quoting mistake in hooks/hooks.json is invisible
+      # to every test that imports the script directly.
+      #
+      # The run must assert output, not just a zero exit. If the command ever
+      # lost its script argument -- an exec form would do exactly that under
+      # Codex, which has no `args` -- bare `python3` would read the payload on
+      # stdin, parse `{...}` as a dict literal, and exit 0 having done nothing.
+      - name: Hook command from hooks.json, both payload shapes
+        run: |
+          set -eu
+          cmd="$(python3 -c "import json;print(json.load(open('hooks/hooks.json'))['hooks']['PostToolUse'][0]['hooks'][0]['command'])")"
+          export CLAUDE_PLUGIN_ROOT="$PWD"
+          resolved="${cmd//\$\{CLAUDE_PLUGIN_ROOT\}/$CLAUDE_PLUGIN_ROOT}"
+          echo "resolved command: $resolved"
+
+          # A repository with one standing defect, so the hook has something to
+          # say. Each shape gets its own copy: --new-only keeps a baseline, and
+          # the second run against the same root would correctly report nothing.
+          for shape in claude codex; do
+            repo="$(mktemp -d)"
+            git init -q "$repo"
+            printf 'Acme.\n\n## Rules\n\n- a\n\n## Commands\n\n```sh\nmake\n```\n' > "$repo/AGENTS.md"
+            export XDG_STATE_HOME="$repo/.state"
+            if [ "$shape" = claude ]; then
+              out="$(printf '{"tool_input":{"file_path":"%s/AGENTS.md"},"cwd":"%s"}' "$repo" "$repo" \
+                | CLAUDE_PROJECT_DIR="$repo" bash -c "$resolved")"
+            else
+              out="$(printf '{"tool_name":"apply_patch","cwd":"%s","tool_input":{"command":"*** Update File: AGENTS.md"}}' "$repo" \
+                | env -u CLAUDE_PROJECT_DIR bash -c "$resolved")"
+            fi
+            echo "$shape: $out"
+            printf '%s' "$out" | python3 -c "
+          import json, sys
+          payload = json.load(sys.stdin)
+          assert 'instruction-keeper' in payload['systemMessage'], payload
+          assert payload['hookSpecificOutput']['hookEventName'] == 'PostToolUse', payload
+          assert payload['hookSpecificOutput']['additionalContext'].strip(), payload
+          "
+          done
+        shell: bash
+
 # Not run here: `claude plugin validate --strict`. Both manifests pass it on a
 # clean checkout, and the command needs no credentials, but the CLI is not on a
 # GitHub-hosted runner by default and this workflow has not been proven against

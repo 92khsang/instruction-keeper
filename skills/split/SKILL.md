@@ -26,6 +26,13 @@ Invoke the `instruction-standard` skill, then:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py" --project-root "${CLAUDE_PROJECT_DIR}"
 ```
 
+`${CLAUDE_PLUGIN_ROOT}` is substituted by Claude Code. If the literal text
+`${CLAUDE_PLUGIN_ROOT}` reaches the shell, or the path expands to nothing, the
+host does not substitute it: find `scripts/check_instructions.py` under the
+installed plugin directory and use that path instead. The same applies to
+`${CLAUDE_PROJECT_DIR}` — fall back to the repository root of the working
+directory.
+
 Whenever either file of the pair exists, the first line of the output is the
 budget, on a clean run too:
 

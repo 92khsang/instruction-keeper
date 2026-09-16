@@ -106,8 +106,9 @@ skill).
 
 Requires `python3` on `PATH` — the checker and the hook are standard library
 only, Python 3.8+. Without it the hook cannot start and the skills lose their
-deterministic half. This release is tested on Claude Code on Linux and macOS;
-see [Scope](#hosts-and-platforms) for what that leaves out.
+deterministic half. This release is tested on Claude Code on Linux and macOS,
+and installs into Codex from the same directory; see
+[Scope](#hosts-and-platforms) for what each of those claims covers.
 
 For one session, without installing:
 
@@ -130,6 +131,62 @@ installing, or run `/reload-plugins`.
 Note that Claude Code ships a builtin `/init`. Typing `/init` gets the builtin,
 which generates a `CLAUDE.md` from a codebase scan; this plugin's command is
 `/instruction-keeper:init` and writes the `AGENTS.md` pair instead.
+
+### Codex
+
+Codex reads `.claude-plugin/plugin.json` directly — it is third in its manifest
+search order, after a root `plugin.json` carrying an Agent Plugins schema and
+`.codex-plugin/plugin.json` — so the same directory installs, through
+`/plugins` in the Codex CLI. There is no second manifest and no second hooks
+file: the hook config is written in the one form both runtimes accept.
+
+Three things made that possible, and none of them is an accident on Codex's
+side. It accepts `Write` and `Edit` as matcher aliases for its own
+`apply_patch`, "for compatibility with hook configurations that describe edits
+using Claude Code-style names". It sets `CLAUDE_PLUGIN_ROOT` alongside its own
+`PLUGIN_ROOT`, "for compatibility with existing plugin hooks". And its
+`PostToolUse` stdin and stdout contracts — `tool_input`, `systemMessage`,
+`hookSpecificOutput.additionalContext` — are the same fields.
+
+Two things differ, and the plugin handles both rather than assuming:
+
+* Codex's command handler has no `args` array, only `command`, so
+  `hooks/hooks.json` writes one quoted string. An exec form would deserialize
+  there with the script dropped and bare `python3` left reading the payload as
+  a program.
+* Codex sets no `CLAUDE_PROJECT_DIR` and states patch paths relative to the
+  working directory, so the hook takes the files from the `apply_patch`
+  envelope and finds the repository root by walking up for `.git`, which is
+  Codex's own default `project_root_markers`.
+
+**What is and is not verified.** The hook script was run end to end against a
+Codex-shaped `apply_patch` payload — patch envelope parsed, relative paths
+resolved against a package working directory, root recovered from `.git`,
+findings emitted on `additionalContext` — including from a plugin directory
+whose path contains a space. The checker is a plain script with no host
+coupling; `python3 scripts/check_instructions.py --project-root .` is the same
+command anywhere.
+
+The plugin has **not** been installed into a running Codex CLI, so `/plugins`
+discovery and the manifest parse are read from Codex's source rather than
+observed. Treat Codex support as implemented and not yet witnessed.
+
+**The four skills are the weakest part of that claim.** Their bodies address
+the checker as `${CLAUDE_PLUGIN_ROOT}/scripts/check_instructions.py`, and
+nothing found in Codex's source substitutes that token inside a `SKILL.md`
+body — Codex sets `CLAUDE_PLUGIN_ROOT` for hook processes, not for the session
+shell. Codex will discover the skills, because `skills/` is its default skill
+root, but their commands may arrive with an empty path. Each skill now says
+what to do when the placeholder is not substituted: locate
+`scripts/check_instructions.py` under the installed plugin directory. That is a
+fallback, not a fix, and it is the first thing to check when Codex is actually
+run.
+
+`agents/instruction-auditor.md` does not carry over. A Codex subagent is a TOML
+file under `.codex/agents/` with `name`, `description` and
+`developer_instructions`, Codex's plugin manifest has no `agents` field, and
+nothing documents a plugin shipping one. The checker, the hook and the four
+skills are what a Codex install gets.
 
 ## Using the checker directly
 
@@ -269,9 +326,13 @@ incident behind it. **Silence from the checker is not approval.**
 Two things have different scopes here, and conflating them would be the kind of
 unverified assertion this plugin exists to catch.
 
-**Where the plugin runs: Claude Code on Linux and macOS.** That is what is
-tested — CI runs both suites on Python 3.8 and on the current release, on
-`ubuntu-latest` — and the hook, skills and agent are Claude Code components.
+**Where the plugin runs: Claude Code on Linux and macOS, and Codex on the
+same.** Claude Code is what CI exercises — both suites on Python 3.8 and on the
+current release, on `ubuntu-latest`. Codex installs from the same directory and
+the hook was run against a Codex-shaped payload, but no step has been executed
+inside a running Codex CLI; see [Installation](#codex) for exactly which parts
+were observed and which were read. `agents/instruction-auditor.md` is Claude
+Code only.
 
 **What the checker models: Claude Code and Codex.** Both loading rules are
 implemented and both are reported on every run. The Codex rules come from
